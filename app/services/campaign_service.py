@@ -240,17 +240,20 @@ class CampaignService:
         """Where the current run stands: emails sent, failed and still queued, and when the next one goes out.
         None when the campaign has no run in progress."""
         db = get_supabase()
-        counts = {s: self._count_recipients(campaign_id, [s]) for s in ("pending", "sending", "sent", "failed")}
-        queued = counts["pending"] + counts["sending"]
-        if not queued and not counts["sent"] and not counts["failed"]:
+        # The total is counted in one query and the rest derived from it: counting each status separately can
+        # catch an email between 'sending' and 'sent' and count it twice
+        total = self._count_recipients(campaign_id, ["pending", "sending", "sent", "failed"])
+        if not total:
             return None
+        sent, failed = self._count_recipients(campaign_id, ["sent"]), self._count_recipients(campaign_id, ["failed"])
+        sent, failed = min(sent, total), min(failed, total - min(sent, total))
         nxt = (db.table("campaign_recipients").select("send_after").eq("campaign_id", campaign_id)
                .eq("send_status", "pending").order("send_after").limit(1).execute().data)
         return {
-            "total": queued + counts["sent"] + counts["failed"],
-            "sent": counts["sent"],
-            "failed": counts["failed"],
-            "queued": queued,
+            "total": total,
+            "sent": sent,
+            "failed": failed,
+            "queued": total - sent - failed,
             "next_send_at": nxt[0]["send_after"] if nxt else None,
         }
 

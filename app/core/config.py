@@ -21,6 +21,11 @@ class Settings(BaseSettings):
     # Emails your Resend plan allows per day (free plan: 100). Used by the pre-send checks.
     DAILY_SEND_LIMIT: int = 100
 
+    # The spam detector (live spam score, spam guide, spam model) is moving to its own app. false = this dashboard
+    # stays a campaign system: no spam scoring, no model loaded at startup, and the pre-send review runs without the
+    # two content checks. The code stays in place until the new app takes it over.
+    SPAM_DETECTOR_ENABLED: bool = True
+
     # Email design: company name in the email header/footer and the accent colour
     BRAND_NAME: str = "Arvistry"
     # CADTRI orange, deep enough for white button text in emails (5.2:1)

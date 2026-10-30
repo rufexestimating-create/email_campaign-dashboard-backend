@@ -31,7 +31,8 @@ def get_logs(limit: int = Query(50, ge=1, le=100), user: dict = Depends(get_curr
 
 @router.get("/stats", summary="Get email delivery statistics")
 def get_stats(user: dict = Depends(get_current_user)):
-    return email_service.get_stats(user_id=user["id"])
+    # The dashboard also learns here whether to show the spam detector's parts (settings.SPAM_DETECTOR_ENABLED)
+    return {**email_service.get_stats(user_id=user["id"]), "spam_detector_enabled": settings.SPAM_DETECTOR_ENABLED}
 
 
 @router.get("/config-status", summary="Check Resend and Hostinger config status")

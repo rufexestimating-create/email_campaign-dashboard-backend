@@ -16,10 +16,11 @@ async def lifespan(app: FastAPI):
     # Background loop that sends scheduled / recurring campaigns
     scheduler = asyncio.create_task(campaign_scheduler())
     # Load the placement model off the event loop, so startup isn't held up and the first spam check is fast
-    warm_up = asyncio.create_task(asyncio.to_thread(placement_model.warm_up))
+    warm_up = asyncio.create_task(asyncio.to_thread(placement_model.warm_up)) if settings.SPAM_DETECTOR_ENABLED else None
     yield
     scheduler.cancel()
-    warm_up.cancel()
+    if warm_up:
+        warm_up.cancel()
 
 
 app = FastAPI(

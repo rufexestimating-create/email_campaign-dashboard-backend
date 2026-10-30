@@ -67,22 +67,24 @@ def precheck(user_id: str, data: dict) -> dict:
     recipients = sorted({e.strip().lower() for e in data["recipients"] if e and "@" in e})
     recs: list[dict] = []
 
-    # 1. Spam risk for each version
-    versions = {"A": placement_model.score(data["subject"], data["body"], data["content_type"], user_id)}
+    # 1. Spam risk for each version (only while the spam detector is part of this app)
     ab = data.get("ab_test") or {}
-    if ab.get("enabled") and ab.get("subject_b") and ab.get("body_b"):
-        versions["B"] = placement_model.score(ab["subject_b"], ab["body_b"], data["content_type"], user_id)
-    worst = max(versions.values(), key=lambda v: v["score"])
-    names = " and ".join(f"version {k}" for k in versions) if len(versions) > 1 else "your email"
-    if worst["level"] == "poor":
-        top = ", ".join(f"\"{k['matched']}\"" for k in worst["keywords"][:3]) or worst["issues"][0]["title"].lower()
-        _rec(recs, "spam_high", "danger", f"High spam risk ({worst['score']}/100)",
-             f"{names.capitalize()} contains wording that spam filters flag, e.g. {top}. Replace the highlighted words before sending.")
-    elif worst["level"] == "fair":
-        _rec(recs, "spam_medium", "warning", f"Some spam risk ({worst['score']}/100)",
-             "A few words or formatting choices could push this into spam. Check the highlighted items in the spam check panel.")
-    else:
-        _rec(recs, "spam_low", "good", f"Low spam risk ({worst['score']}/100)", "The wording and formatting look clean.")
+    versions = {}
+    if settings.SPAM_DETECTOR_ENABLED:
+        versions["A"] = placement_model.score(data["subject"], data["body"], data["content_type"], user_id)
+        if ab.get("enabled") and ab.get("subject_b") and ab.get("body_b"):
+            versions["B"] = placement_model.score(ab["subject_b"], ab["body_b"], data["content_type"], user_id)
+        worst = max(versions.values(), key=lambda v: v["score"])
+        names = " and ".join(f"version {k}" for k in versions) if len(versions) > 1 else "your email"
+        if worst["level"] == "poor":
+            top = ", ".join(f"\"{k['matched']}\"" for k in worst["keywords"][:3]) or worst["issues"][0]["title"].lower()
+            _rec(recs, "spam_high", "danger", f"High spam risk ({worst['score']}/100)",
+                 f"{names.capitalize()} contains wording that spam filters flag, e.g. {top}. Replace the highlighted words before sending.")
+        elif worst["level"] == "fair":
+            _rec(recs, "spam_medium", "warning", f"Some spam risk ({worst['score']}/100)",
+                 "A few words or formatting choices could push this into spam. Check the highlighted items in the spam check panel.")
+        else:
+            _rec(recs, "spam_low", "good", f"Low spam risk ({worst['score']}/100)", "The wording and formatting look clean.")
 
     # 2. Consumer behaviour from the user's own history
     history = _history(user_id)
@@ -159,7 +161,7 @@ def precheck(user_id: str, data: dict) -> dict:
                  {"type": "schedule_at", "at": suggestion.isoformat(), "label": f"Schedule for {suggestion.strftime('%a %d %b, %I:%M %p').replace(' 0', ' ')}"})
 
     # 5. Content and sender best practices
-    if not any(v["stats"]["personalised"] for v in versions.values()):
+    if versions and not any(v["stats"]["personalised"] for v in versions.values()):
         _rec(recs, "personalise", "tip", "Not personalized",
              "Emails that greet people by name (e.g. \"Hi {{first_name}}\") get noticeably more opens and replies from business contacts.")
     if not (ab.get("enabled")) and len(recipients) >= 50:

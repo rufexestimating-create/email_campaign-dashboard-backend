@@ -1,0 +1,34 @@
+# Render Blueprint for the backend (FastAPI). Render -> New -> Blueprint -> pick this repo.
+# Secrets marked sync: false are asked for once in the Render dashboard and never stored in the repo.
+services:
+  - type: web
+    name: email-dashboard-backend
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/v1/health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.10
+      - key: JWT_SECRET_KEY
+        generateValue: true
+      - key: ACCESS_TOKEN_EXPIRE_MINUTES
+        value: "1440"
+      - key: RESEND_API_KEY
+        sync: false
+      - key: DEFAULT_FROM_EMAIL
+        sync: false
+      - key: RESEND_WEBHOOK_SECRET
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: BRAND_NAME
+        sync: false
+      - key: BRAND_COLOR
+        sync: false
+      # The Netlify site address, e.g. https://your-site.netlify.app (used in verify / reset email links)
+      - key: FRONTEND_URL
+        sync: false

@@ -1,0 +1,15 @@
+# Secrets: set these in the Render dashboard instead
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Experiments and large local data (GitHub rejects files over 100 MB)
+ml/datasets/
+*.ipynb
+.ipynb_checkpoints/

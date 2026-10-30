@@ -1,0 +1,199 @@
+{
+  "model": "spam_lr",
+  "version": 2,
+  "trained_at": "2026-10-28T17:31:53+00:00",
+  "data_source": "synthetic",
+  "warning": "SYNTHETIC demo data: these metrics only show the pipeline works, not real inbox placement.",
+  "note": "SYNTHETIC demo data: only 0 usable real labels, need 200 with both spam and inbox examples",
+  "label": "spam=1 (spam, complained), inbox=0 (inbox, promotions)",
+  "rows": {
+    "total": 1500,
+    "train": 1200,
+    "test": 300,
+    "train_spam_rate": 0.3308
+  },
+  "split": {
+    "method": "time-based",
+    "test_fraction": 0.2,
+    "train_until": "2026-05-24 21:07:00+00:00",
+    "test_from": "2026-05-25 00:00:00+00:00"
+  },
+  "metrics": {
+    "test_rows": 300,
+    "test_spam_rate": 0.3,
+    "brier": 0.0985,
+    "roc_auc": 0.87,
+    "pr_auc": 0.7941
+  },
+  "model_spec": {
+    "estimator": "LogisticRegression(class_weight='balanced')",
+    "calibration": "CalibratedClassifierCV(method='isotonic', cv=3)",
+    "text_features": "TF-IDF 1-2 grams on subject and plain-text body",
+    "numeric_features": [
+      "subject_length",
+      "word_count",
+      "links",
+      "images",
+      "exclamations",
+      "money_signs",
+      "caps_ratio",
+      "has_unsubscribe",
+      "has_address",
+      "personalised",
+      "kw_high",
+      "kw_medium",
+      "kw_low",
+      "kw_in_subject",
+      "issue_subject_caps",
+      "issue_subject_exclaim",
+      "issue_fake_reply",
+      "issue_subject_emoji",
+      "issue_subject_money",
+      "issue_body_caps",
+      "issue_body_multi_exclaim",
+      "issue_spaced_out",
+      "issue_shortener",
+      "issue_ip_link",
+      "issue_many_links",
+      "issue_image_heavy",
+      "issue_html_unsafe",
+      "issue_no_plain_text"
+    ],
+    "input_columns": [
+      "subject",
+      "body",
+      "content_type"
+    ]
+  },
+  "top_coefficients": {
+    "toward_spam": [
+      {
+        "feature": "numeric__kw_medium",
+        "coefficient": 1.2588
+      },
+      {
+        "feature": "numeric__kw_in_subject",
+        "coefficient": 0.6525
+      },
+      {
+        "feature": "body__early you",
+        "coefficient": 0.5549
+      },
+      {
+        "feature": "subject__free",
+        "coefficient": 0.5303
+      },
+      {
+        "feature": "body__the detailed",
+        "coefficient": 0.5125
+      },
+      {
+        "feature": "numeric__kw_high",
+        "coefficient": 0.4955
+      },
+      {
+        "feature": "body__you reply",
+        "coefficient": 0.4746
+      },
+      {
+        "feature": "body__when you",
+        "coefficient": 0.4746
+      },
+      {
+        "feature": "body__when",
+        "coefficient": 0.4746
+      },
+      {
+        "feature": "body__mention",
+        "coefficient": 0.4746
+      },
+      {
+        "feature": "body__hi this",
+        "coefficient": 0.448
+      },
+      {
+        "feature": "body__contract administration",
+        "coefficient": 0.4202
+      },
+      {
+        "feature": "body__contract",
+        "coefficient": 0.4202
+      },
+      {
+        "feature": "body__administration",
+        "coefficient": 0.4202
+      },
+      {
+        "feature": "subject__permit",
+        "coefficient": 0.3977
+      }
+    ],
+    "toward_inbox": [
+      {
+        "feature": "numeric__has_unsubscribe",
+        "coefficient": -0.9965
+      },
+      {
+        "feature": "numeric__exclamations",
+        "coefficient": -0.7509
+      },
+      {
+        "feature": "body__the design",
+        "coefficient": -0.5229
+      },
+      {
+        "feature": "subject__remodel",
+        "coefficient": -0.4203
+      },
+      {
+        "feature": "subject__deal",
+        "coefficient": -0.4146
+      },
+      {
+        "feature": "numeric__subject_length",
+        "coefficient": -0.4014
+      },
+      {
+        "feature": "body__hi our",
+        "coefficient": -0.3863
+      },
+      {
+        "feature": "subject__coordinating",
+        "coefficient": -0.3566
+      },
+      {
+        "feature": "subject__coordinating trades",
+        "coefficient": -0.3566
+      },
+      {
+        "feature": "subject__the remodel",
+        "coefficient": -0.3566
+      },
+      {
+        "feature": "subject__trades",
+        "coefficient": -0.3566
+      },
+      {
+        "feature": "subject__trades for",
+        "coefficient": -0.3566
+      },
+      {
+        "feature": "body__options",
+        "coefficient": -0.3358
+      },
+      {
+        "feature": "body__options appraisal",
+        "coefficient": -0.3358
+      },
+      {
+        "feature": "subject__of",
+        "coefficient": -0.3288
+      }
+    ]
+  },
+  "files": {
+    "model": "spam_lr_v2_synthetic.joblib",
+    "calibration_plot": "calibration_v2_synthetic.png"
+  },
+  "sklearn_version": "1.9.1"
+}

@@ -1,0 +1,127 @@
+{
+  "model": "lead_scoring",
+  "version": 1,
+  "trained_at": "2026-10-28T18:04:42+00:00",
+  "data_source": "synthetic",
+  "warning": "SYNTHETIC demo data: shows the pipeline works, not how your leads behave.",
+  "note": "SYNTHETIC demo data: 0 leads (need 100) with positives none (need 10 each)",
+  "gbm_library": "lightgbm",
+  "rows": {
+    "total": 1500,
+    "train": 1200,
+    "test": 300
+  },
+  "split": {
+    "method": "time-based (lead created_at)",
+    "test_fraction": 0.2
+  },
+  "thresholds": {
+    "sales": 0.6,
+    "nurture": 0.3
+  },
+  "comparison": {
+    "reply": {
+      "features": [
+        "sends",
+        "days_since_first_send",
+        "days_since_last_send",
+        "clicks",
+        "click_rate",
+        "days_since_last_click",
+        "bounced",
+        "complained",
+        "company_domain",
+        "role_based",
+        "has_company",
+        "timezone_known",
+        "mobile_share",
+        "persona_contractor",
+        "persona_architect",
+        "persona_homeowner",
+        "persona_other"
+      ],
+      "positives_train": 341,
+      "positives_test": 85,
+      "logistic_regression": {
+        "pr_auc": 0.5323,
+        "roc_auc": 0.7146
+      },
+      "lightgbm": {
+        "pr_auc": 0.4614,
+        "roc_auc": 0.6686
+      },
+      "winner": "logistic_regression",
+      "explanations": "coefficients"
+    },
+    "mql": {
+      "features": [
+        "sends",
+        "days_since_first_send",
+        "days_since_last_send",
+        "clicks",
+        "click_rate",
+        "days_since_last_click",
+        "bounced",
+        "complained",
+        "company_domain",
+        "role_based",
+        "has_company",
+        "timezone_known",
+        "mobile_share",
+        "persona_contractor",
+        "persona_architect",
+        "persona_homeowner",
+        "persona_other",
+        "replies",
+        "days_since_last_reply"
+      ],
+      "positives_train": 443,
+      "positives_test": 101,
+      "logistic_regression": {
+        "pr_auc": 0.7768,
+        "roc_auc": 0.8519
+      },
+      "lightgbm": {
+        "pr_auc": 0.7458,
+        "roc_auc": 0.832
+      },
+      "winner": "logistic_regression",
+      "explanations": "coefficients"
+    },
+    "sql": {
+      "features": [
+        "sends",
+        "days_since_first_send",
+        "days_since_last_send",
+        "clicks",
+        "click_rate",
+        "days_since_last_click",
+        "bounced",
+        "complained",
+        "company_domain",
+        "role_based",
+        "has_company",
+        "timezone_known",
+        "mobile_share",
+        "persona_contractor",
+        "persona_architect",
+        "persona_homeowner",
+        "persona_other",
+        "replies",
+        "days_since_last_reply"
+      ],
+      "positives_train": 301,
+      "positives_test": 74,
+      "logistic_regression": {
+        "pr_auc": 0.7562,
+        "roc_auc": 0.8659
+      },
+      "lightgbm": {
+        "pr_auc": 0.6267,
+        "roc_auc": 0.8113
+      },
+      "winner": "logistic_regression",
+      "explanations": "coefficients"
+    }
+  }
+}

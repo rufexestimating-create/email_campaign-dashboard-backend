@@ -1,0 +1,199 @@
+{
+  "model": "spam_lr",
+  "version": 1,
+  "trained_at": "2026-10-28T17:29:56+00:00",
+  "data_source": "synthetic",
+  "warning": "SYNTHETIC demo data: these metrics only show the pipeline works, not real inbox placement.",
+  "note": "SYNTHETIC demo data: only 0 usable real labels, need 200 with both spam and inbox examples",
+  "label": "spam=1 (spam, complained), inbox=0 (inbox, promotions)",
+  "rows": {
+    "total": 1500,
+    "train": 1200,
+    "test": 300,
+    "train_spam_rate": 0.3225
+  },
+  "split": {
+    "method": "time-based",
+    "test_fraction": 0.2,
+    "train_until": "2026-05-24 21:07:00+00:00",
+    "test_from": "2026-05-25 00:00:00+00:00"
+  },
+  "metrics": {
+    "test_rows": 300,
+    "test_spam_rate": 0.3067,
+    "brier": 0.0752,
+    "roc_auc": 0.8829,
+    "pr_auc": 0.8574
+  },
+  "model_spec": {
+    "estimator": "LogisticRegression(class_weight='balanced')",
+    "calibration": "CalibratedClassifierCV(method='isotonic', cv=3)",
+    "text_features": "TF-IDF 1-2 grams on subject and plain-text body",
+    "numeric_features": [
+      "subject_length",
+      "word_count",
+      "links",
+      "images",
+      "exclamations",
+      "money_signs",
+      "caps_ratio",
+      "has_unsubscribe",
+      "has_address",
+      "personalised",
+      "kw_high",
+      "kw_medium",
+      "kw_low",
+      "kw_in_subject",
+      "issue_subject_caps",
+      "issue_subject_exclaim",
+      "issue_fake_reply",
+      "issue_subject_emoji",
+      "issue_subject_money",
+      "issue_body_caps",
+      "issue_body_multi_exclaim",
+      "issue_spaced_out",
+      "issue_shortener",
+      "issue_ip_link",
+      "issue_many_links",
+      "issue_image_heavy",
+      "issue_html_unsafe",
+      "issue_no_plain_text"
+    ],
+    "input_columns": [
+      "subject",
+      "body",
+      "content_type"
+    ]
+  },
+  "top_coefficients": {
+    "toward_spam": [
+      {
+        "feature": "body__this month",
+        "coefficient": 1.4399
+      },
+      {
+        "feature": "body__month only",
+        "coefficient": 1.4399
+      },
+      {
+        "feature": "body__month",
+        "coefficient": 1.4302
+      },
+      {
+        "feature": "numeric__kw_medium",
+        "coefficient": 1.3509
+      },
+      {
+        "feature": "body__only",
+        "coefficient": 0.9746
+      },
+      {
+        "feature": "body__this",
+        "coefficient": 0.9036
+      },
+      {
+        "feature": "numeric__kw_high",
+        "coefficient": 0.7463
+      },
+      {
+        "feature": "subject__free",
+        "coefficient": 0.576
+      },
+      {
+        "feature": "body__the workplace",
+        "coefficient": 0.5539
+      },
+      {
+        "feature": "body__only we",
+        "coefficient": 0.5121
+      },
+      {
+        "feature": "body__workplace strategy",
+        "coefficient": 0.4533
+      },
+      {
+        "feature": "body__workplace",
+        "coefficient": 0.4533
+      },
+      {
+        "feature": "body__contract administration",
+        "coefficient": 0.4449
+      },
+      {
+        "feature": "body__contract",
+        "coefficient": 0.4449
+      },
+      {
+        "feature": "body__administration",
+        "coefficient": 0.4449
+      }
+    ],
+    "toward_inbox": [
+      {
+        "feature": "numeric__has_unsubscribe",
+        "coefficient": -0.7953
+      },
+      {
+        "feature": "body__also",
+        "coefficient": -0.7168
+      },
+      {
+        "feature": "body__also offer",
+        "coefficient": -0.7168
+      },
+      {
+        "feature": "body__we also",
+        "coefficient": -0.7168
+      },
+      {
+        "feature": "subject__now",
+        "coefficient": -0.6366
+      },
+      {
+        "feature": "body__hi would",
+        "coefficient": -0.599
+      },
+      {
+        "feature": "subject__re no",
+        "coefficient": -0.5539
+      },
+      {
+        "feature": "body__offer",
+        "coefficient": -0.5096
+      },
+      {
+        "feature": "numeric__exclamations",
+        "coefficient": -0.4234
+      },
+      {
+        "feature": "subject__questions",
+        "coefficient": -0.3756
+      },
+      {
+        "feature": "body__plan",
+        "coefficient": -0.3625
+      },
+      {
+        "feature": "body__hi if",
+        "coefficient": -0.3615
+      },
+      {
+        "feature": "subject__special",
+        "coefficient": -0.3481
+      },
+      {
+        "feature": "numeric__subject_length",
+        "coefficient": -0.3326
+      },
+      {
+        "feature": "subject__act",
+        "coefficient": -0.325
+      }
+    ]
+  },
+  "files": {
+    "model": "spam_lr_v1_synthetic.joblib",
+    "calibration_plot": "calibration_v1_synthetic.png"
+  },
+  "sklearn_version": "1.9.1"
+}

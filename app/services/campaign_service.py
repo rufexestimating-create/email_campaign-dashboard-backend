@@ -475,11 +475,15 @@ class CampaignService:
                                    self._count_logs(c["id"], since, last_event="complained"))
 
     def _send_due(self, c: dict, now: datetime) -> int:
-        """Sends this campaign's recipients whose time has come. Returns how many went out."""
+        """Sends this campaign's recipients whose time has come. Returns how many went out.
+        Paced speeds send at most one email per queue pass, so a backlog (after a restart or a slow moment) still
+        drains a few seconds apart instead of in a burst."""
         db, sent = get_supabase(), 0
-        for _ in range(MAX_BATCHES_PER_TICK):
+        paced = (c.get("send_speed") or pacing.DEFAULT_SPEED) != "fast"
+        size, batches = (1, 1) if paced else (BATCH_SIZE, MAX_BATCHES_PER_TICK)
+        for _ in range(batches):
             due = (db.table("campaign_recipients").select("id").eq("campaign_id", c["id"]).eq("send_status", "pending")
-                   .lte("send_after", now.isoformat()).order("send_after").limit(BATCH_SIZE).execute().data)
+                   .lte("send_after", now.isoformat()).order("send_after").limit(size).execute().data)
             if not due:
                 break
             # Claim first (pending -> sending), so a second worker can never send the same email

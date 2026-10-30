@@ -5,10 +5,22 @@ from app.services import follow_ups
 from app.services.campaign_service import campaign_service
 
 CHECK_INTERVAL_SECONDS = 30
+QUEUE_INTERVAL_SECONDS = 5  # paced sends are 5-30 s apart, so the queue is checked more often than the schedule
+
+
+async def _send_queue():
+    """Sends the queued emails of running campaigns as their send times come (see campaign_service.process_queue)."""
+    while True:
+        try:
+            await asyncio.to_thread(campaign_service.process_queue)
+        except Exception as e:
+            print(f"[scheduler] send queue error: {e}", flush=True)
+        await asyncio.sleep(QUEUE_INTERVAL_SECONDS)
 
 
 async def campaign_scheduler():
-    """Cron-style loop: every 30s, sends scheduled and recurring campaigns that are due, then due follow-ups. Runs while the API is up."""
+    """Cron-style loop: every 30s, starts scheduled and recurring campaigns that are due, then sends due follow-ups.
+    A second loop sends each running campaign's queued emails. Runs while the API is up."""
     if not is_supabase_configured():
         print("[scheduler] Supabase not configured - campaign scheduler disabled", flush=True)
         return
@@ -18,10 +30,14 @@ async def campaign_scheduler():
         except Exception as e:
             print(f"[scheduler] startup recovery failed: {e}", flush=True)
 
-    while True:
-        for job, name in ((campaign_service.run_due_campaigns, "campaigns"), (follow_ups.run_due, "follow-ups")):
-            try:
-                await asyncio.to_thread(job)
-            except Exception as e:
-                print(f"[scheduler] {name} error: {e}", flush=True)
-        await asyncio.sleep(CHECK_INTERVAL_SECONDS)
+    queue = asyncio.create_task(_send_queue())
+    try:
+        while True:
+            for job, name in ((campaign_service.run_due_campaigns, "campaigns"), (follow_ups.run_due, "follow-ups")):
+                try:
+                    await asyncio.to_thread(job)
+                except Exception as e:
+                    print(f"[scheduler] {name} error: {e}", flush=True)
+            await asyncio.sleep(CHECK_INTERVAL_SECONDS)
+    finally:
+        queue.cancel()

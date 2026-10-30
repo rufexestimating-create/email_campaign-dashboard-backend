@@ -15,13 +15,14 @@ from fastapi import HTTPException, status
 from app.core.config import settings
 from app.db.supabase import get_supabase
 from app.schemas.campaign import CampaignCreate
-from app.services import email_layout, event_tracking, follow_ups, warmup
+from app.services import email_layout, event_tracking, follow_ups, pacing, warmup
 from app.services.email_service import email_service
 
 logger = logging.getLogger(__name__)
 
 BATCH_SIZE = 100            # Resend batch API maximum
 BATCH_PAUSE_SECONDS = 0.15  # stay under Resend's 10 requests/second
+MAX_BATCHES_PER_TICK = 10   # 'fast' campaigns: at most 1,000 emails per queue pass
 PAGE_SIZE = 1000            # Supabase returns at most 1000 rows per request
 MIN_RECURRING_INTERVAL = timedelta(hours=1)
 REFRESH_LIMIT = 50
@@ -174,6 +175,8 @@ class CampaignService:
             "next_run_at": next_run.isoformat() if next_run else None,
             "recipient_count": len(recipients),
             "status": status_,
+            "send_speed": data.send_speed,
+            "run_origin": "draft" if status_ == "sending" else None,
         }).execute().data[0]
 
         try:
@@ -213,7 +216,8 @@ class CampaignService:
         campaigns = (
             get_supabase().table("campaigns")
             .select("id, name, status, schedule_type, scheduled_at, cron_expression, timezone, next_run_at, last_run_at, "
-                    "run_count, recipient_count, ab_enabled, ab_split, subject_a, subject_b, last_error, created_at")
+                    "run_count, recipient_count, ab_enabled, ab_split, subject_a, subject_b, last_error, created_at, "
+                    "send_speed, paused_reason")
             .eq("user_id", user_id)
             .order("created_at", desc=True)
             .limit(100)
@@ -229,11 +233,31 @@ class CampaignService:
         for c in campaigns:
             c["variant_stats"] = stats.get(c["id"], {})
             c["follow_ups"] = follow.get(c["id"])
+            c["progress"] = self.progress(c["id"]) if c["status"] in ("sending", "paused") else None
         return campaigns
+
+    def progress(self, campaign_id: str) -> dict | None:
+        """Where the current run stands: emails sent, failed and still queued, and when the next one goes out.
+        None when the campaign has no run in progress."""
+        db = get_supabase()
+        counts = {s: self._count_recipients(campaign_id, [s]) for s in ("pending", "sending", "sent", "failed")}
+        queued = counts["pending"] + counts["sending"]
+        if not queued and not counts["sent"] and not counts["failed"]:
+            return None
+        nxt = (db.table("campaign_recipients").select("send_after").eq("campaign_id", campaign_id)
+               .eq("send_status", "pending").order("send_after").limit(1).execute().data)
+        return {
+            "total": queued + counts["sent"] + counts["failed"],
+            "sent": counts["sent"],
+            "failed": counts["failed"],
+            "queued": queued,
+            "next_send_at": nxt[0]["send_after"] if nxt else None,
+        }
 
     def detail(self, user_id: str, campaign_id: str) -> dict:
         campaign = self._get_owned(user_id, campaign_id)
         campaign["variant_stats"] = self._stats_for([campaign_id]).get(campaign_id, {})
+        campaign["progress"] = self.progress(campaign_id) if campaign["status"] in ("sending", "paused") else None
         campaign["recent_logs"] = (
             get_supabase().table("email_logs")
             .select("id, recipient, subject, status, variant, last_event, error, sent_at")
@@ -247,38 +271,59 @@ class CampaignService:
 
     # ---------- Actions ----------
 
-    def _claim_for_sending(self, campaign_id: str, from_statuses: list[str]) -> bool:
-        """Atomically flips the campaign to 'sending' so two workers can never send it twice."""
+    def _claim_for_sending(self, campaign_id: str, from_status: str) -> bool:
+        """Atomically flips the campaign to 'sending' so two workers can never send it twice. The run isn't queued yet
+        (run_started_at is cleared); start_run does that."""
         res = (
             get_supabase().table("campaigns")
-            .update({"status": "sending", "updated_at": now_utc().isoformat()})
+            .update({"status": "sending", "run_origin": from_status, "run_started_at": None, "paused_reason": None,
+                     "updated_at": now_utc().isoformat()})
             .eq("id", campaign_id)
-            .in_("status", from_statuses)
+            .eq("status", from_status)
             .execute()
         )
         return bool(res.data)
 
-    def send_now(self, user_id: str, campaign_id: str) -> str:
+    def _count_recipients(self, campaign_id: str, statuses: list[str]) -> int:
+        res = (get_supabase().table("campaign_recipients").select("id", count="exact")
+               .eq("campaign_id", campaign_id).in_("send_status", statuses).limit(1).execute())
+        return res.count or 0
+
+    def _has_unsent(self, campaign_id: str) -> bool:
+        return self._count_recipients(campaign_id, ["pending", "sending"]) > 0
+
+    def send_now(self, user_id: str, campaign_id: str):
         campaign = self._get_owned(user_id, campaign_id)
         if campaign["status"] == "sending":
             raise _bad_request("This campaign is already sending.")
-        if not self._claim_for_sending(campaign_id, [campaign["status"]]):
+        if campaign["status"] == "paused" and self._has_unsent(campaign_id):
+            raise _bad_request("This campaign stopped partway through. Use Resume to send the rest, so nobody gets it twice.")
+        if not self._claim_for_sending(campaign_id, campaign["status"]):
             raise _bad_request("Campaign status changed, refresh and try again.")
-        return campaign["status"]
 
     def pause(self, user_id: str, campaign_id: str):
         campaign = self._get_owned(user_id, campaign_id)
+        if campaign["status"] == "sending":
+            # Mid-run: the emails still queued wait until Resume
+            get_supabase().table("campaigns").update(
+                {"status": "paused", "paused_reason": None, "updated_at": now_utc().isoformat()}
+            ).eq("id", campaign_id).eq("status", "sending").execute()
+            return
         if campaign["status"] != "scheduled":
-            raise _bad_request("Only scheduled campaigns can be paused.")
+            raise _bad_request("Only scheduled or sending campaigns can be paused.")
         get_supabase().table("campaigns").update(
             {"status": "paused", "next_run_at": None, "updated_at": now_utc().isoformat()}
         ).eq("id", campaign_id).execute()
 
-    def resume(self, user_id: str, campaign_id: str):
-        """Turns on a campaign's schedule (paused, draft, or a finished recurring campaign)."""
+    def resume(self, user_id: str, campaign_id: str) -> str:
+        """Carries on a run that was paused partway (returns 'sending'), or turns on the campaign's schedule
+        (paused, draft, or a finished recurring campaign; returns 'scheduled')."""
         c = self._get_owned(user_id, campaign_id)
         if c["status"] in ("scheduled", "sending"):
             raise _bad_request("This campaign is already active.")
+        if c["status"] == "paused" and self._has_unsent(campaign_id):
+            self._resume_run(c)
+            return "sending"
         if c["schedule_type"] == "recurring":
             next_run = upcoming_cron_runs(c["cron_expression"], c["timezone"], 2)[0]
         elif c["schedule_type"] == "once":
@@ -290,6 +335,7 @@ class CampaignService:
         get_supabase().table("campaigns").update(
             {"status": "scheduled", "next_run_at": next_run.isoformat(), "updated_at": now_utc().isoformat()}
         ).eq("id", campaign_id).execute()
+        return "scheduled"
 
     def delete(self, user_id: str, campaign_id: str):
         campaign = self._get_owned(user_id, campaign_id)
@@ -304,7 +350,7 @@ class CampaignService:
         while True:
             page = (
                 db.table("campaign_recipients")
-                .select("email, name, variables, variant")
+                .select("id, email, name, variables, variant")
                 .eq("campaign_id", campaign_id)
                 .order("email")
                 .range(start, start + PAGE_SIZE - 1)
@@ -368,45 +414,104 @@ class CampaignService:
         ids = iter(res.get("data") or [])
         return [("failed", None, errors[i]) if i in errors else ("sent", next(ids, {}).get("id"), None) for i in range(len(messages))]
 
-    def _deliver(self, c: dict) -> tuple[int, int]:
-        recipients = self._load_recipients(c["id"])
-        db, sent, failed = get_supabase(), 0, 0
-        for i in range(0, len(recipients), BATCH_SIZE):
-            chunk = recipients[i:i + BATCH_SIZE]
+    # ---------- Paced sending ----------
+    # A run is queued by start_run (every recipient gets a send time spaced by the campaign's speed) and sent by
+    # process_queue, which the scheduler calls every few seconds. Because the queue lives in the database, a run
+    # carries on after a server restart, can be paused and resumed partway, and stops itself if the list goes bad.
+
+    def _queue(self, campaign_id: str, recipients: list[dict], speed: str):
+        """Gives each recipient a send time from now, spaced by `speed`, and marks it pending."""
+        times = pacing.send_times(len(recipients), speed, now_utc())
+        rows = [{"id": r["id"], "campaign_id": campaign_id, "email": r["email"], "send_status": "pending",
+                 "send_after": t.isoformat(), "sent_at": None, "send_error": None} for r, t in zip(recipients, times)]
+        db = get_supabase()
+        for i in range(0, len(rows), 500):
+            db.table("campaign_recipients").upsert(rows[i:i + 500], on_conflict="id").execute()
+
+    def start_run(self, campaign_id: str):
+        """Queues one run of a campaign already claimed for sending (status 'sending')."""
+        db = get_supabase()
+        rows = db.table("campaigns").select("id, status, send_speed").eq("id", campaign_id).limit(1).execute().data
+        if not rows or rows[0]["status"] != "sending":
+            return
+        recipients = self._load_recipients(campaign_id)
+        random.shuffle(recipients)  # A and B recipients spread over the whole run, not one version first
+        self._queue(campaign_id, recipients, rows[0].get("send_speed") or pacing.DEFAULT_SPEED)
+        # Only now is the run visible to process_queue, so it can't finish a run whose queue isn't written yet
+        db.table("campaigns").update({"run_started_at": now_utc().isoformat(), "last_error": None,
+                                      "updated_at": now_utc().isoformat()}).eq("id", campaign_id).execute()
+
+    def _resume_run(self, c: dict):
+        """Re-spaces the emails still queued from now, so a resumed run doesn't fire its backlog in one burst.
+        Bounces and complaints are counted afresh from here on."""
+        db, rows, start = get_supabase(), [], 0
+        while True:
+            page = (db.table("campaign_recipients").select("id, email").eq("campaign_id", c["id"])
+                    .in_("send_status", ["pending", "sending"]).order("send_after").range(start, start + PAGE_SIZE - 1).execute().data)
+            rows.extend(page)
+            if len(page) < PAGE_SIZE:
+                break
+            start += PAGE_SIZE
+        self._queue(c["id"], rows, c.get("send_speed") or pacing.DEFAULT_SPEED)
+        db.table("campaigns").update({"status": "sending", "paused_reason": None, "run_started_at": now_utc().isoformat(),
+                                      "updated_at": now_utc().isoformat()}).eq("id", c["id"]).eq("status", "paused").execute()
+
+    def _count_logs(self, campaign_id: str, since: str, **filters) -> int:
+        q = (get_supabase().table("email_logs").select("id", count="exact").eq("campaign_id", campaign_id)
+             .in_("variant", ["A", "B"]).gte("sent_at", since))  # follow-ups (F1, F2) are judged on their own
+        for column, value in filters.items():
+            q = q.eq(column, value)
+        return q.limit(1).execute().count or 0
+
+    def _auto_pause_reason(self, c: dict) -> str | None:
+        since = c["run_started_at"]
+        sent = self._count_logs(c["id"], since, status="sent")
+        if not sent:
+            return None
+        return pacing.pause_reason(sent, self._count_logs(c["id"], since, last_event="bounced"),
+                                   self._count_logs(c["id"], since, last_event="complained"))
+
+    def _send_due(self, c: dict, now: datetime) -> int:
+        """Sends this campaign's recipients whose time has come. Returns how many went out."""
+        db, sent = get_supabase(), 0
+        for _ in range(MAX_BATCHES_PER_TICK):
+            due = (db.table("campaign_recipients").select("id").eq("campaign_id", c["id"]).eq("send_status", "pending")
+                   .lte("send_after", now.isoformat()).order("send_after").limit(BATCH_SIZE).execute().data)
+            if not due:
+                break
+            # Claim first (pending -> sending), so a second worker can never send the same email
+            chunk = (db.table("campaign_recipients").update({"send_status": "sending"})
+                     .in_("id", [r["id"] for r in due]).eq("send_status", "pending").execute().data)
+            if not chunk:
+                break
             messages = [self._build_message(c, r) for r in chunk]
             results = self._send_chunk(messages)
             db.table("email_logs").insert(self._log_rows(c, chunk, messages, results)).execute()
-            failed += sum(1 for s, _, _ in results if s == "failed")
-            sent += len(results) - sum(1 for s, _, _ in results if s == "failed")
-            if i + BATCH_SIZE < len(recipients):
-                time.sleep(BATCH_PAUSE_SECONDS)
-        return sent, failed
+            stamp = now_utc().isoformat()
+            ok = [r["id"] for r, (s, _, _) in zip(chunk, results) if s != "failed"]
+            if ok:
+                db.table("campaign_recipients").update({"send_status": "sent", "sent_at": stamp}).in_("id", ok).execute()
+            for r, (s, _, error) in zip(chunk, results):
+                if s == "failed":
+                    db.table("campaign_recipients").update({"send_status": "failed", "sent_at": stamp,
+                                                            "send_error": (error or "")[:500]}).eq("id", r["id"]).execute()
+            sent += len(ok)
+            if len(due) < BATCH_SIZE:
+                break
+            time.sleep(BATCH_PAUSE_SECONDS)
+        return sent
 
-    def run_campaign(self, campaign_id: str, previous_status: str):
-        """Sends one run of a campaign that was already claimed (status 'sending'), then sets its next state."""
+    def _finish_run(self, c: dict):
+        """The run's queue is empty: record it and set what the campaign does next."""
         db = get_supabase()
-        c = db.table("campaigns").select("*").eq("id", campaign_id).limit(1).execute().data[0]
-        error, sent = None, 0
-        try:
-            sent, failed = self._deliver(c)
-            if sent == 0 and failed:
-                error = f"All {failed} emails failed. Check the activity log for Resend's error."
-        except Exception as e:
-            error = f"Send aborted: {e}"
-            print(f"[campaigns] {campaign_id} failed: {e}", flush=True)
-
-        update = {
-            "last_run_at": now_utc().isoformat(),
-            "run_count": c["run_count"] + 1,
-            "last_error": error,
-            "updated_at": now_utc().isoformat(),
-        }
-        current = db.table("campaigns").select("status").eq("id", campaign_id).limit(1).execute().data
-        if not current:
-            return  # deleted meanwhile
-        if current[0]["status"] == "paused" or (c["schedule_type"] == "recurring" and previous_status == "paused"):
+        sent, failed = self._count_recipients(c["id"], ["sent"]), self._count_recipients(c["id"], ["failed"])
+        error = f"All {failed} emails failed. Check the activity log for Resend's error." if failed and not sent else None
+        update = {"last_run_at": now_utc().isoformat(), "run_count": c["run_count"] + 1, "last_error": error,
+                  "updated_at": now_utc().isoformat()}
+        origin = c.get("run_origin") or "draft"
+        if c["schedule_type"] == "recurring" and origin == "paused":
             update["status"] = "paused"
-        elif c["schedule_type"] == "recurring" and previous_status == "scheduled":
+        elif c["schedule_type"] == "recurring" and origin == "scheduled":
             try:
                 update["status"] = "scheduled"
                 update["next_run_at"] = upcoming_cron_runs(c["cron_expression"], c["timezone"], 2)[0].isoformat()
@@ -415,21 +520,46 @@ class CampaignService:
         else:
             update["status"] = "failed" if error else "sent"
             update["next_run_at"] = None
-        db.table("campaigns").update(update).eq("id", campaign_id).execute()
+        # Only if it's still sending: a pause pressed at the last moment wins
+        if not db.table("campaigns").update(update).eq("id", c["id"]).eq("status", "sending").execute().data:
+            return
         if sent and c["schedule_type"] != "recurring":
             try:
                 follow_ups.after_campaign_sent(c)
             except Exception as e:  # never fail a sent campaign over its follow-ups
-                logger.warning("Could not queue follow-ups for %s: %s", campaign_id, e)
+                logger.warning("Could not queue follow-ups for %s: %s", c["id"], e)
         print(
-            f"[scheduler] '{c['name']}' done: {sent if not error else 0} sent"
-            + (f", next send {update['next_run_at']} (UTC)" if update.get("next_run_at") else "")
-            + (f", error: {error}" if error else ""),
+            f"[scheduler] '{c['name']}' done: {sent} sent, {failed} failed"
+            + (f", next send {update['next_run_at']} (UTC)" if update.get("next_run_at") else ""),
             flush=True,
         )
 
+    def process_queue(self, now: datetime | None = None) -> int:
+        """Called by the scheduler every few seconds: sends what's due in every running campaign, pauses a run whose
+        bounces or complaints pass the limits, and closes runs with nothing left to send. Returns emails sent."""
+        now, total = now or now_utc(), 0
+        running = get_supabase().table("campaigns").select("*").eq("status", "sending").execute().data
+        for c in running:
+            if not c.get("run_started_at"):
+                continue  # claimed, queue still being written
+            try:
+                reason = self._auto_pause_reason(c)
+                if reason:
+                    get_supabase().table("campaigns").update(
+                        {"status": "paused", "paused_reason": reason, "updated_at": now_utc().isoformat()}
+                    ).eq("id", c["id"]).eq("status", "sending").execute()
+                    print(f"[scheduler] '{c['name']}' paused: {reason}", flush=True)
+                    continue
+                sent = self._send_due(c, now)
+                total += sent
+                if not sent and not self._has_unsent(c["id"]):
+                    self._finish_run(c)
+            except Exception as e:
+                print(f"[scheduler] queue error for campaign {c['id']}: {e}", flush=True)
+        return total
+
     def run_due_campaigns(self):
-        """Called by the scheduler loop: sends every scheduled campaign whose time has come."""
+        """Called by the scheduler loop: starts every scheduled campaign whose time has come."""
         due = (
             get_supabase().table("campaigns")
             .select("id")
@@ -441,16 +571,21 @@ class CampaignService:
             .data
         )
         for row in due:
-            if self._claim_for_sending(row["id"], ["scheduled"]):
-                print(f"[scheduler] {now_utc():%H:%M:%S} UTC - campaign {row['id']} is due, sending now", flush=True)
-                self.run_campaign(row["id"], "scheduled")
+            if self._claim_for_sending(row["id"], "scheduled"):
+                print(f"[scheduler] {now_utc():%H:%M:%S} UTC - campaign {row['id']} is due, queueing its emails", flush=True)
+                self.start_run(row["id"])
 
     def recover_interrupted(self):
-        """A campaign left in 'sending' after a server restart can't be resumed safely (some emails may be out)."""
-        get_supabase().table("campaigns").update({
-            "status": "failed",
-            "last_error": "Interrupted by a server restart. Check the activity log before re-sending.",
-        }).eq("status", "sending").execute()
+        """After a restart. Emails claimed but never confirmed may or may not have gone out, so they're marked failed
+        rather than risk sending them twice; campaigns claimed but not yet queued get queued; the rest carry on."""
+        db = get_supabase()
+        db.table("campaign_recipients").update({
+            "send_status": "failed",
+            "send_error": "Interrupted by a server restart. It may or may not have been sent; check the activity log.",
+        }).eq("send_status", "sending").execute()
+        for row in db.table("campaigns").select("id, run_started_at").eq("status", "sending").execute().data:
+            if not row["run_started_at"]:
+                self.start_run(row["id"])
 
     # ---------- A/B results ----------
 

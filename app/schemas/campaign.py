@@ -44,6 +44,8 @@ class CampaignCreate(BaseModel):
     schedule: ScheduleIn
     save_as_draft: bool = False
     follow_ups: List[FollowUpIn] = Field(default_factory=list, max_length=2)
+    # How fast the emails go out: safe = one every 15-30 s, normal = every 5-10 s, fast = all at once (small lists)
+    send_speed: Literal["safe", "normal", "fast"] = "safe"
     # Required when the pre-send review has a failed check: the server re-runs it and refuses the send without one
     override_reason: Optional[str] = Field(None, max_length=500)
 

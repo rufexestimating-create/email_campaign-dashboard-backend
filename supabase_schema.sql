@@ -100,6 +100,23 @@ create table if not exists public.campaign_recipients (
   unique (campaign_id, email)
 );
 
+-- Paced ("drip") sending: each recipient gets its own send time, so a campaign goes out gradually,
+-- survives a server restart, and can pause itself if bounces or complaints show up.
+alter table public.campaigns add column if not exists send_speed text not null default 'safe';
+alter table public.campaigns drop constraint if exists campaigns_send_speed_check;
+alter table public.campaigns add constraint campaigns_send_speed_check check (send_speed in ('safe', 'normal', 'fast'));
+alter table public.campaigns add column if not exists run_origin text;            -- status the current run started from
+alter table public.campaigns add column if not exists run_started_at timestamptz;
+alter table public.campaigns add column if not exists paused_reason text;         -- why sending stopped by itself
+alter table public.campaign_recipients add column if not exists send_status text not null default 'idle';
+alter table public.campaign_recipients drop constraint if exists campaign_recipients_send_status_check;
+alter table public.campaign_recipients add constraint campaign_recipients_send_status_check
+  check (send_status in ('idle', 'pending', 'sending', 'sent', 'failed'));
+alter table public.campaign_recipients add column if not exists send_after timestamptz;
+alter table public.campaign_recipients add column if not exists sent_at timestamptz;
+alter table public.campaign_recipients add column if not exists send_error text;
+create index if not exists campaign_recipients_queue_idx on public.campaign_recipients (campaign_id, send_status, send_after);
+
 -- Link each sent email to its campaign + A/B variant; last_event is synced from Resend (delivered/opened/clicked/...)
 alter table public.email_logs add column if not exists campaign_id uuid references public.campaigns(id) on delete set null;
 alter table public.email_logs add column if not exists variant     text;

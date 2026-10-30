@@ -39,7 +39,7 @@ def create_campaign(data: CampaignCreate, background_tasks: BackgroundTasks, use
         _enforce_preflight(user["id"], data)
     campaign = campaign_service.create(user["id"], data)
     if campaign["status"] == "sending":
-        background_tasks.add_task(campaign_service.run_campaign, campaign["id"], "draft")
+        background_tasks.add_task(campaign_service.start_run, campaign["id"])
     return campaign
 
 
@@ -93,21 +93,21 @@ def get_campaign(campaign_id: str, user: dict = Depends(get_current_user)):
 
 @router.post("/{campaign_id}/send-now", summary="Send the campaign immediately")
 def send_now(campaign_id: str, background_tasks: BackgroundTasks, user: dict = Depends(get_current_user)):
-    previous = campaign_service.send_now(user["id"], campaign_id)
-    background_tasks.add_task(campaign_service.run_campaign, campaign_id, previous)
+    campaign_service.send_now(user["id"], campaign_id)
+    background_tasks.add_task(campaign_service.start_run, campaign_id)
     return {"message": "Sending started."}
 
 
-@router.post("/{campaign_id}/pause", summary="Pause a scheduled campaign")
+@router.post("/{campaign_id}/pause", summary="Pause a scheduled campaign, or stop a sending one partway")
 def pause(campaign_id: str, user: dict = Depends(get_current_user)):
     campaign_service.pause(user["id"], campaign_id)
     return {"message": "Campaign paused."}
 
 
-@router.post("/{campaign_id}/resume", summary="Activate the campaign's schedule")
+@router.post("/{campaign_id}/resume", summary="Carry on a paused send, or activate the campaign's schedule")
 def resume(campaign_id: str, user: dict = Depends(get_current_user)):
-    campaign_service.resume(user["id"], campaign_id)
-    return {"message": "Campaign scheduled."}
+    state = campaign_service.resume(user["id"], campaign_id)
+    return {"message": "Sending resumed." if state == "sending" else "Campaign scheduled.", "status": state}
 
 
 @router.post("/{campaign_id}/refresh-events", summary="Sync delivered/opened/clicked status from Resend")

@@ -112,8 +112,15 @@ def _lead_id(db, user_id: str, email: str) -> str | None:
 
 
 def _advance_last_event(db, log: dict, kind: str):
-    if EVENT_RANK.get(kind, -1) > EVENT_RANK.get(log.get("last_event") or "", -1):
-        db.table("email_logs").update({"last_event": kind}).eq("id", log["id"]).execute()
+    """Moves last_event forward only. The rank check runs in the database, not on the row read earlier: Resend sends
+    "sent" and "delivered" within the same second, and two webhooks handled at once would otherwise let the slower
+    "sent" overwrite "delivered"."""
+    rank = EVENT_RANK.get(kind, -1)
+    if rank <= EVENT_RANK.get(log.get("last_event") or "", -1):
+        return
+    lower = ",".join(k for k, r in EVENT_RANK.items() if r < rank)
+    allowed = f"last_event.is.null,last_event.in.({lower})" if lower else "last_event.is.null"
+    db.table("email_logs").update({"last_event": kind}).eq("id", log["id"]).or_(allowed).execute()
 
 
 def _auto_label(db, log: dict, kind: str, occurred: datetime, bounce_type: str | None):

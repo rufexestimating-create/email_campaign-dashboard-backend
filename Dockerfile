@@ -1,4 +1,4 @@
-# Backend image for Hugging Face Spaces (Docker SDK). Spaces route traffic to port 7860 and run as user 1000.
+# Backend image (Railway, a VPS, or Hugging Face Spaces). Listens on $PORT when the host sets it, otherwise 7860.
 FROM python:3.12.10-slim
 
 # lightgbm needs the OpenMP runtime
@@ -17,4 +17,4 @@ RUN pip install --no-cache-dir --upgrade pip && pip install --no-cache-dir -r re
 COPY --chown=user . .
 
 EXPOSE 7860
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "7860"]
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-7860}"]

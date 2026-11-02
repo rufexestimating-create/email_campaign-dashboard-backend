@@ -319,7 +319,8 @@ def lead_activity(logs: list[dict]) -> dict[str, dict]:
 
 
 def scores_overview(user_id: str) -> dict:
-    """Every lead for the UI, with its activity (emails sent, last send, best engagement), most recently emailed first;
+    """Every lead for the UI, with its activity (emails sent, last send, best engagement) and next automatic follow-up,
+    most recently emailed first;
     plus the stored scores, counts per band and segment, and the sales alerts."""
     from app.db.supabase import get_supabase
 
@@ -329,8 +330,13 @@ def scores_overview(user_id: str) -> dict:
     ).eq("user_id", user_id).order("created_at"))
     activity = lead_activity(_pages(db.table("email_logs").select("recipient, status, last_event, sent_at").eq("user_id", user_id)))
     none = {"emails_sent": 0, "last_sent_at": None, "engagement": "none"}
+    # When each lead's next automatic follow-up is due, so the stage picker shows what it is turning on or off
+    next_follow_up: dict[str, str] = {}
+    for f in _pages(db.table("follow_up_sends").select("recipient, due_at").eq("user_id", user_id).eq("status", "pending").order("due_at")):
+        next_follow_up.setdefault(f["recipient"].lower(), f["due_at"])
     for l in leads:
         l.update(activity.get(l["email"].lower(), none))
+        l["next_follow_up_at"] = next_follow_up.get(l["email"].lower())
     leads.sort(key=lambda l: l["last_sent_at"] or "", reverse=True)
     bundle = load_bundle()
     meta = bundle["meta"] if bundle else None

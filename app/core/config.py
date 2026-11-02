@@ -18,6 +18,15 @@ class Settings(BaseSettings):
     # Signing secret of the webhook endpoint (Resend -> Webhooks -> your endpoint), starts with whsec_
     RESEND_WEBHOOK_SECRET: str = ""
 
+    # Where replies go when a campaign sets no reply address. The From domain (e.g. hello@arvistry.com) has no mailbox,
+    # so without this replies bounce. Must be a real inbox; the IMAP settings below read it to track replies.
+    REPLY_TO_EMAIL: str = ""
+    # The reply mailbox, read every minute (read-only) to record who replied and what they wrote. Empty = off.
+    IMAP_HOST: str = "imap.hostinger.com"
+    IMAP_PORT: int = 993
+    IMAP_USER: str = ""
+    IMAP_PASSWORD: str = ""
+
     # Emails your Resend plan allows per day (free plan: 100). Used by the pre-send checks.
     DAILY_SEND_LIMIT: int = 100
 

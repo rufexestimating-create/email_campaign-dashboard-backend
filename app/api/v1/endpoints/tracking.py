@@ -8,7 +8,7 @@ from app.api.deps import get_current_user
 from app.core.config import settings
 from app.db.supabase import get_supabase
 from app.schemas.tracking import LeadUpdate, PlacementLabelCreate, ReplyCreate
-from app.services import event_tracking, follow_ups, lead_scoring
+from app.services import event_tracking, follow_ups, lead_scoring, reply_inbox
 from app.services.local_time import is_valid_timezone
 
 logger = logging.getLogger(__name__)
@@ -79,6 +79,12 @@ def update_lead(lead_id: str, data: LeadUpdate, user: dict = Depends(get_current
     if not row:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Contact not found.")
     return row
+
+
+@router.get("/replies", summary="Newest replies read from the reply mailbox: who replied, to which campaign, and what they wrote")
+def replies(limit: int = Query(50, ge=1, le=200), user: dict = Depends(get_current_user)):
+    return {"tracking_on": reply_inbox.is_configured(), "reply_to": settings.REPLY_TO_EMAIL or None,
+            "replies": reply_inbox.recent(user["id"], limit)}
 
 
 def _lead_email(user_id: str, lead_id: str) -> str:

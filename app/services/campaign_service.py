@@ -90,9 +90,14 @@ def tidy_subject(subject: str) -> str:
     return s[:1].upper() + s[1:] if s else s
 
 
+def reply_address(c: dict) -> str | None:
+    """The campaign's own reply address, else the account-wide reply mailbox (REPLY_TO_EMAIL), else none."""
+    return c.get("reply_to") or settings.REPLY_TO_EMAIL or None
+
+
 def unsubscribe_header(c: dict) -> str:
     """List-Unsubscribe header: Gmail and Yahoo show an "Unsubscribe" link next to the sender and trust mail that has it."""
-    address = c.get("reply_to") or (re.search(r"[\w.+-]+@[\w.-]+", c["from_email"] or "") or [settings.DEFAULT_FROM_EMAIL])[0]
+    address = reply_address(c) or (re.search(r"[\w.+-]+@[\w.-]+", c["from_email"] or "") or [settings.DEFAULT_FROM_EMAIL])[0]
     return f"<mailto:{address}?subject=unsubscribe>"
 
 
@@ -380,8 +385,8 @@ class CampaignService:
         }
         if not is_html:
             msg["text"] = body  # plain-text alternative helps deliverability
-        if c.get("reply_to"):
-            msg["reply_to"] = c["reply_to"]
+        if reply_address(c):
+            msg["reply_to"] = reply_address(c)
         return msg
 
     def _log_rows(self, c: dict, run_recipients: list[dict], messages: list[dict], results: list[tuple]) -> list[dict]:

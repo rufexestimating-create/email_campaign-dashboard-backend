@@ -72,8 +72,8 @@ class EmailService:
             "subject": request.subject,
             "html": html_content,
         }
-        if request.reply_to:
-            params["reply_to"] = request.reply_to
+        if request.reply_to or settings.REPLY_TO_EMAIL:
+            params["reply_to"] = request.reply_to or settings.REPLY_TO_EMAIL
         if request.text:
             params["text"] = request.text
 

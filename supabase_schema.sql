@@ -189,7 +189,7 @@ create table if not exists public.email_events (
   user_agent  text,
   link        text,                         -- clicked link
   bounce_type text,                         -- Permanent / Transient
-  source      text not null default 'resend_webhook' check (source in ('resend_webhook', 'manual')),
+  source      text not null default 'resend_webhook' check (source in ('resend_webhook', 'manual', 'inbox')),  -- inbox = read from the reply mailbox
   svix_id     text unique,                  -- webhook message id: retries are stored once
   data        jsonb not null default '{}'::jsonb,
   created_at  timestamptz not null default now()
@@ -197,6 +197,22 @@ create table if not exists public.email_events (
 create index if not exists email_events_user_time_idx on public.email_events (user_id, occurred_at desc);
 create index if not exists email_events_email_idx     on public.email_events (email_id);
 create index if not exists email_events_recipient_idx on public.email_events (user_id, recipient);
+
+-- Replies read from the reply mailbox (IMAP, app/services/reply_inbox.py). One row per inbox message.
+create table if not exists public.email_replies (
+  id          uuid primary key default gen_random_uuid(),
+  user_id     uuid not null references public.users(id) on delete cascade,
+  email_id    text not null references public.email_logs(id) on delete cascade,
+  campaign_id uuid references public.campaigns(id) on delete set null,
+  recipient   text not null,
+  from_name   text,
+  subject     text,
+  snippet     text,
+  message_id  text not null unique,
+  received_at timestamptz not null,
+  created_at  timestamptz not null default now()
+);
+create index if not exists email_replies_user_time_idx on public.email_replies (user_id, received_at desc);
 
 -- Where emails actually landed: seed-test results, plus complaints and bounces added automatically.
 -- These are the training labels for the spam/inbox model.
@@ -320,6 +336,7 @@ alter table public.seed_inboxes    enable row level security;
 
 alter table public.leads               enable row level security;
 alter table public.email_events        enable row level security;
+alter table public.email_replies       enable row level security;
 alter table public.placement_labels    enable row level security;
 alter table public.preflight_decisions enable row level security;
 alter table public.campaign_follow_ups enable row level security;

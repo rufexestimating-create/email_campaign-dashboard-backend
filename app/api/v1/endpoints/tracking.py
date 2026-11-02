@@ -7,8 +7,8 @@ from fastapi.concurrency import run_in_threadpool
 from app.api.deps import get_current_user
 from app.core.config import settings
 from app.db.supabase import get_supabase
-from app.schemas.tracking import LeadUpdate, PlacementLabelCreate, ReplyCreate
-from app.services import event_tracking, follow_ups, lead_scoring, reply_inbox
+from app.schemas.tracking import LeadEmailCreate, LeadUpdate, PlacementLabelCreate, ReplyCreate
+from app.services import event_tracking, follow_ups, lead_email, lead_scoring, reply_inbox
 from app.services.local_time import is_valid_timezone
 
 logger = logging.getLogger(__name__)
@@ -102,3 +102,9 @@ def lead_follow_ups(lead_id: str, user: dict = Depends(get_current_user)):
 @router.post("/leads/{lead_id}/follow-ups/send-now", summary="Send this contact's waiting follow-ups now instead of at their scheduled time")
 def lead_follow_ups_send_now(lead_id: str, user: dict = Depends(get_current_user)):
     return {"queued": follow_ups.send_now_for(user["id"], _lead_email(user["id"], lead_id))}
+
+
+@router.post("/leads/{lead_id}/email", status_code=status.HTTP_201_CREATED,
+             summary="Write to one lead now: answer their reply or follow up whenever you choose")
+def email_lead(lead_id: str, data: LeadEmailCreate, user: dict = Depends(get_current_user)):
+    return lead_email.send(user["id"], lead_id, data.subject.strip(), data.body, data.reply_id)

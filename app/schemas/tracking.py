@@ -28,3 +28,9 @@ class LeadUpdate(BaseModel):
     state: Optional[str] = Field(None, max_length=40)
     timezone: Optional[str] = Field(None, max_length=60)
     lifecycle_stage: Optional[Literal["new", "mql", "sql", "customer", "lost"]] = None  # the outcome lead scoring learns from
+
+
+class LeadEmailCreate(BaseModel):
+    subject: str = Field(..., min_length=1, max_length=255)
+    body: str = Field(..., min_length=1, max_length=20_000)
+    reply_id: Optional[str] = None  # answering this reply: the email joins the same conversation in their inbox

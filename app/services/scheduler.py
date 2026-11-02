@@ -2,7 +2,7 @@ import asyncio
 
 from app.core.config import settings
 from app.db.supabase import is_supabase_configured
-from app.services import follow_ups, reply_inbox
+from app.services import follow_ups, mailbox_warmup, reply_inbox
 from app.services.campaign_service import campaign_service
 
 CHECK_INTERVAL_SECONDS = 30
@@ -21,7 +21,7 @@ async def _send_queue():
 
 async def campaign_scheduler():
     """Cron-style loop: every 30s, reads new replies (at most once a minute), starts scheduled and recurring campaigns
-    that are due, then sends due follow-ups.
+    that are due, sends due follow-ups, then runs the mailbox warm-up.
     A second loop sends each running campaign's queued emails. Runs while the API is up."""
     if not is_supabase_configured():
         print("[scheduler] Supabase not configured - campaign scheduler disabled", flush=True)
@@ -39,7 +39,8 @@ async def campaign_scheduler():
     try:
         while True:
             # Replies first, so a reply that just arrived stops that person's follow-up in the same pass
-            jobs = ((reply_inbox.poll, "replies"), (campaign_service.run_due_campaigns, "campaigns"), (follow_ups.run_due, "follow-ups"))
+            jobs = ((reply_inbox.poll, "replies"), (campaign_service.run_due_campaigns, "campaigns"), (follow_ups.run_due, "follow-ups"),
+                    (mailbox_warmup.run, "mailbox warm-up"))
             for job, name in jobs:
                 try:
                     await asyncio.to_thread(job)

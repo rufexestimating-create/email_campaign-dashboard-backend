@@ -27,6 +27,12 @@ class Settings(BaseSettings):
     IMAP_USER: str = ""
     IMAP_PASSWORD: str = ""
 
+    # Mailbox warm-up: the team's own mailboxes email each other during office hours in this timezone.
+    # Their passwords are encrypted with MAILBOX_SECRET_KEY (empty = derived from JWT_SECRET_KEY). Changing the key
+    # means the mailboxes have to be added again.
+    MAILBOX_SECRET_KEY: str = ""
+    WARMUP_TIMEZONE: str = "Asia/Karachi"
+
     # Emails your Resend plan allows per day (free plan: 100). Used by the pre-send checks.
     DAILY_SEND_LIMIT: int = 100
 

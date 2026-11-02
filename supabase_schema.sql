@@ -334,6 +334,57 @@ create table if not exists public.seed_inboxes (
 alter table public.warmup_settings enable row level security;
 alter table public.seed_inboxes    enable row level security;
 
+-- ---------- Mailbox warm-up ----------
+-- The team's own mailboxes (e.g. Hostinger: ali@, sara@) email each other a few times a day, open each other's mail,
+-- move it out of spam and reply, so each mailbox builds a sending reputation before it emails clients.
+create table if not exists public.mailboxes (
+  id                 uuid primary key default gen_random_uuid(),
+  user_id            uuid not null references public.users(id) on delete cascade,
+  email              text not null,
+  display_name       text,
+  smtp_host          text not null,
+  smtp_port          int  not null default 465,
+  imap_host          text not null,
+  imap_port          int  not null default 993,
+  username           text not null,
+  password_enc       text not null,              -- encrypted on the server (MAILBOX_SECRET_KEY), never plain text
+  status             text not null default 'active' check (status in ('active', 'paused', 'error')),
+  warmup_started_on  date not null default current_date,
+  daily_limit        int  not null default 30 check (daily_limit between 2 and 50),
+  last_error         text,
+  last_checked_at    timestamptz,
+  created_at         timestamptz not null default now(),
+  updated_at         timestamptz not null default now(),
+  unique (user_id, email)
+);
+
+create table if not exists public.warmup_messages (
+  id               uuid primary key default gen_random_uuid(),
+  user_id          uuid not null references public.users(id) on delete cascade,
+  from_mailbox_id  uuid not null references public.mailboxes(id) on delete cascade,
+  to_mailbox_id    uuid not null references public.mailboxes(id) on delete cascade,
+  kind             text not null check (kind in ('initial', 'reply')),
+  parent_id        uuid references public.warmup_messages(id) on delete cascade,
+  plan_date        date not null,
+  subject          text not null,
+  body             text not null,
+  message_id       text,
+  scheduled_at     timestamptz not null,
+  status           text not null default 'scheduled' check (status in ('scheduled', 'sent', 'failed', 'cancelled')),
+  sent_at          timestamptz,
+  error            text,
+  landed_in        text check (landed_in in ('inbox', 'spam')),
+  found_at         timestamptz,
+  rescued          boolean not null default false,
+  created_at       timestamptz not null default now()
+);
+create index if not exists warmup_messages_due_idx  on public.warmup_messages (status, scheduled_at);
+create index if not exists warmup_messages_from_idx on public.warmup_messages (from_mailbox_id, plan_date);
+create index if not exists warmup_messages_to_idx   on public.warmup_messages (to_mailbox_id, status);
+
+alter table public.mailboxes       enable row level security;
+alter table public.warmup_messages enable row level security;
+
 alter table public.leads               enable row level security;
 alter table public.email_events        enable row level security;
 alter table public.email_replies       enable row level security;

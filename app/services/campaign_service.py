@@ -29,6 +29,7 @@ REFRESH_LIMIT = 50
 FINAL_EVENTS = ("clicked", "replied", "bounced", "complained")
 
 PLACEHOLDER_RE = re.compile(r"{{\s*([a-zA-Z0-9_]+)\s*}}")
+NAME_COLUMNS = {"name", "full_name", "first_name", "firstname", "last_name", "lastname"}
 
 
 def now_utc() -> datetime:
@@ -152,7 +153,9 @@ class CampaignService:
         recipients = self._clean_recipients(data)
         # Seed inboxes (the team's own test addresses) ride along on every campaign, so placement can be checked
         known = {r["email"] for r in recipients}
-        recipients += [s for s in warmup.seed_recipients(user_id) if s["email"] not in known]
+        # A seed borrows the first person's CSV columns, so {{subject}}/{{message}} templates don't reach it empty
+        sample = {k: v for k, v in (recipients[0]["variables"] if recipients else {}).items() if k not in NAME_COLUMNS}
+        recipients += [{**s, "variables": {**sample, **s["variables"]}} for s in warmup.seed_recipients(user_id) if s["email"] not in known]
         self._assign_variants(recipients, ab.enabled, ab.split)
 
         if data.save_as_draft:

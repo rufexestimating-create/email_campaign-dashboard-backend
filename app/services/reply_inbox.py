@@ -28,8 +28,14 @@ SNIPPET_LENGTH = 500
 # Out-of-office and other automatic answers aren't real replies: they mustn't stop follow-ups
 AUTO_PRECEDENCE = {"bulk", "junk", "list", "auto_reply"}
 SYSTEM_SENDERS = re.compile(r"^(mailer-daemon|postmaster|no-?reply|do-?not-?reply|bounces?)@", re.I)
-# Where the quoted original starts in a reply: "On Mon, 2 Nov 2026 ... wrote:", Outlook's header block, or "> " lines
-QUOTE_START = re.compile(r"^(On .{0,200}wrote:|-{2,}\s*Original Message\s*-{2,}|_{5,}|From: .+|Sent from my \w+)\s*$", re.I | re.M)
+# Where the quoted original starts in a reply: "On Mon, 2 Nov 2026 ... wrote:" (Gmail wraps it over two lines when the
+# name is long, but never across a blank line), Outlook's header block, or "Sent from my iPhone"
+QUOTE_START = re.compile(
+    r"^(On\s(?:(?!\n[ \t]*\n).){0,300}?\bwrote:|-{2,}\s*Original Message\s*-{2,}|_{5,}|From: .+|Sent from my \w+)[ \t]*$",
+    re.I | re.M | re.S,
+)
+# Gmail's plain-text part writes bold words as *word*
+BOLD_RE = re.compile(r"\*([^*\n]+)\*")
 TAG_RE = re.compile(r"(?is)<(script|style)[^>]*>.*?</\1>|<[^>]+>")
 
 _last_poll = 0.0
@@ -82,11 +88,12 @@ def _body_text(msg: Message) -> str:
 
 def reply_text(body: str) -> str:
     """What they wrote, without the quoted original email below it."""
+    body = body.replace("\r\n", "\n")
     m = QUOTE_START.search(body)
     if m:
         body = body[:m.start()]
     lines = [l for l in body.splitlines() if not l.lstrip().startswith(">")]
-    return re.sub(r"\s+", " ", "\n".join(lines)).strip()[:SNIPPET_LENGTH]
+    return BOLD_RE.sub(r"\1", re.sub(r"\s+", " ", "\n".join(lines))).strip()[:SNIPPET_LENGTH]
 
 
 def parse(raw: bytes, now: datetime | None = None) -> dict | None:

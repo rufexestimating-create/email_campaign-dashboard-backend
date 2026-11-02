@@ -42,3 +42,13 @@ def test_automatic_messages_are_not_replies():
 
 def test_a_human_reply_marked_auto_submitted_no_counts():
     assert parse(message("Yes", "Auto-Submitted: no\r\n"), NOW)["snippet"] == "Yes"
+
+
+def test_gmail_wraps_the_wrote_line_and_marks_bold():
+    body = ('*what is the price?"*\r\n\r\nOn Mon, Nov 2, 2026 at 10:28 PM Rufex Estimating <rufexestimating@gmail.com>\r\n'
+            "wrote:\r\n\r\n> interested share details.\r\n")
+    assert reply_text(body) == 'what is the price?"'
+
+
+def test_a_reply_that_starts_with_on_is_kept():
+    assert reply_text("On Tuesday works for me.\n\nThanks") == "On Tuesday works for me. Thanks"

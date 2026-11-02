@@ -22,9 +22,13 @@ from statistics import median
 import httpx
 
 from app.core.config import settings
-from app.services import campaign_advisor, placement_model, send_time, spam_checker, warmup
+from app.services import campaign_advisor, placement_model, send_time, warmup
 from app.services.event_tracking import provider_for
 from app.services.spam_knowledge import ROLE_BASED_PREFIXES
+
+# Same pattern as the spam checker's. With the spam detector switched off this is the only thing the pre-send
+# review still needs from it, so the review doesn't run the spam checker just to find an unsubscribe line.
+UNSUBSCRIBE_RE = re.compile(r"unsubscribe|opt[\s-]?out|stop (?:receiving|getting) (?:these )?emails|manage (?:your )?(?:email )?preferences", re.I)
 
 FATIGUE_HOURS = 72
 WEEKLY_CAP = 3
@@ -377,8 +381,8 @@ def preflight(user_id: str, data: dict, now: datetime | None = None) -> dict:
     versions = {k: placement_model.score(s, b, data["content_type"], user_id) for k, (s, b) in zip("AB", contents)} if spam_on else {}
     # Gmail's bulk-sender rules need an unsubscribe line whether or not the spam detector is on
     has_unsubscribe = all(
-        (versions[k]["stats"] if spam_on else spam_checker.analyze(s, b, data["content_type"])["stats"])["has_unsubscribe"]
-        for k, (s, b) in zip("AB", contents)
+        versions[k]["stats"]["has_unsubscribe"] if spam_on else bool(UNSUBSCRIBE_RE.search(b))
+        for k, (_, b) in zip("AB", contents)
     )
 
     history = campaign_advisor._history(user_id)

@@ -117,6 +117,7 @@ def test_content_fit_offers_unsubscribe_fix():
 # ---------- Full run ----------
 
 def test_preflight_runs_all_eight_checks(monkeypatch):
+    monkeypatch.setattr(settings, "SPAM_DETECTOR_ENABLED", True)  # the full review, with the spam detector on
     monkeypatch.setattr(campaign_advisor, "_history", lambda user_id: [sent("bounced@gmail.com", 50, "bounced")])
     monkeypatch.setattr(send_time, "load_leads", lambda user_id: {})
     monkeypatch.setattr(send_time, "load_engagement", lambda user_id, days: [])
@@ -143,6 +144,8 @@ def test_preflight_without_the_spam_detector_runs_the_six_campaign_checks(monkey
     """SPAM_DETECTOR_ENABLED=false: no spam scoring at all, the two content checks drop out, the rest are unchanged."""
     monkeypatch.setattr(settings, "SPAM_DETECTOR_ENABLED", False)
     monkeypatch.setattr(pf.placement_model, "score", lambda *a, **k: pytest.fail("spam model must not run"))
+    from app.services import spam_checker
+    monkeypatch.setattr(spam_checker, "analyze", lambda *a, **k: pytest.fail("spam checker must not run"))
     monkeypatch.setattr(campaign_advisor, "_history", lambda user_id: [sent("bounced@gmail.com", 50, "bounced")])
     monkeypatch.setattr(send_time, "load_leads", lambda user_id: {})
     monkeypatch.setattr(send_time, "load_engagement", lambda user_id, days: [])

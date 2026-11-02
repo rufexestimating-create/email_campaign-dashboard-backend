@@ -1,17 +1,10 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from postgrest.exceptions import APIError
 
-from app.api.deps import get_current_user
-from app.core.config import settings
+from app.api.deps import get_current_user, spam_detector_on
 from app.db.supabase import get_supabase
 from app.schemas.campaign import SpamCheckBatchRequest, SpamCheckRequest, SpamKeywordCreate
 from app.services import placement_model, spam_checker, spam_knowledge
-
-
-def spam_detector_on():
-    """Spam scoring and the spam guide answer only while the spam detector is part of this app (settings)."""
-    if not settings.SPAM_DETECTOR_ENABLED:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "The spam detector is moving to its own app and is switched off here.")
 
 
 router = APIRouter(dependencies=[Depends(get_current_user), Depends(spam_detector_on)])

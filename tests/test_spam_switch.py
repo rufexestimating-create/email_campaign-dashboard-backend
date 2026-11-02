@@ -18,7 +18,8 @@ def test_spam_endpoints_answer_404_when_switched_off(monkeypatch):
     c = client()
     try:
         for method, path, body in [("post", "/api/v1/spam/check", SPAMMY), ("post", "/api/v1/template/score", SPAMMY),
-                                   ("post", "/api/v1/spam/check-batch", {"items": [SPAMMY]}), ("get", "/api/v1/spam/knowledge", None)]:
+                                   ("post", "/api/v1/spam/check-batch", {"items": [SPAMMY]}), ("get", "/api/v1/spam/knowledge", None),
+                                   ("get", "/api/v1/insights/model", None), ("get", "/api/v1/insights/model/calibration.png", None)]:
             res = getattr(c, method)(path, json=body) if body else getattr(c, method)(path)
             assert res.status_code == 404, path
         assert c.get("/api/v1/health").status_code == 200  # the rest of the API is untouched

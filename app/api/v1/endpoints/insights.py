@@ -4,7 +4,7 @@ from collections import Counter
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import FileResponse
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, spam_detector_on
 from app.db.supabase import get_supabase
 from app.schemas.insights import SeedCreate, SendPlanRequest, WarmupUpdate
 from app.services import placement_model, send_time, warmup
@@ -59,7 +59,7 @@ def remove_seed(seed_id: str, user: dict = Depends(get_current_user)):
     return {"message": "Removed."}
 
 
-@router.get("/model", summary="The placement model in use: version, training data, metrics and strongest signals")
+@router.get("/model", dependencies=[Depends(spam_detector_on)], summary="The placement model in use: version, training data, metrics and strongest signals")
 def model_info():
     path = placement_model.latest_model_path()
     if path is None:
@@ -69,7 +69,7 @@ def model_info():
     return {"available": True, "label_kind": kind, "weight": placement_model.MODEL_WEIGHT[kind], **meta}
 
 
-@router.get("/model/calibration.png", summary="Calibration plot of the model in use")
+@router.get("/model/calibration.png", dependencies=[Depends(spam_detector_on)], summary="Calibration plot of the model in use")
 def model_calibration():
     path = placement_model.latest_model_path()
     plot = path and path.parent / json.loads(path.with_suffix(".json").read_text(encoding="utf-8"))["files"]["calibration_plot"]

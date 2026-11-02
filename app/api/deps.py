@@ -4,6 +4,7 @@ import jwt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
+from app.core.config import settings
 from app.core.security import decode_access_token
 from app.services.auth_service import auth_service
 
@@ -33,3 +34,9 @@ def get_current_user(credentials: HTTPAuthorizationCredentials | None = Depends(
     if issued_at.replace(microsecond=0) < datetime.fromisoformat(user["password_changed_at"]).replace(microsecond=0):
         raise unauthorized
     return user
+
+
+def spam_detector_on():
+    """Spam scoring, the spam guide and the spam model answer only while the spam detector is part of this app."""
+    if not settings.SPAM_DETECTOR_ENABLED:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "The spam detector is moving to its own app and is switched off here.")

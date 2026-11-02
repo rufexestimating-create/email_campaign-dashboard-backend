@@ -262,6 +262,21 @@ def detail(user_id: str, campaign_id: str) -> dict:
     return {"steps": steps, "sends": rows, "skip_reasons": dict(reasons), "counts": summary_for([campaign_id]).get(campaign_id, {})}
 
 
+def waiting_for(user_id: str, recipient: str) -> dict:
+    """This contact's follow-ups that haven't gone out yet, and when the next one is due."""
+    rows = _db().table("follow_up_sends").select("due_at").eq("user_id", user_id).eq("recipient", recipient) \
+        .eq("status", "pending").order("due_at").execute().data
+    return {"pending": len(rows), "next_due_at": rows[0]["due_at"] if rows else None}
+
+
+def send_now_for(user_id: str, recipient: str) -> int:
+    """Makes this contact's waiting follow-ups due now; the scheduler sends them within 30 seconds, with the usual
+    stop checks (replied, bounced, stage) still applied at send time."""
+    rows = _db().table("follow_up_sends").update({"due_at": datetime.now(timezone.utc).isoformat()}) \
+        .eq("user_id", user_id).eq("recipient", recipient).eq("status", "pending").execute().data
+    return len(rows)
+
+
 def cancel(user_id: str, campaign_id: str) -> int:
     rows = _db().table("follow_up_sends").update({"status": "cancelled", "skip_reason": STOP_REASONS["cancelled"]}) \
         .eq("campaign_id", campaign_id).eq("user_id", user_id).eq("status", "pending").execute().data

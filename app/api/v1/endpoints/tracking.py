@@ -8,7 +8,7 @@ from app.api.deps import get_current_user
 from app.core.config import settings
 from app.db.supabase import get_supabase
 from app.schemas.tracking import LeadUpdate, PlacementLabelCreate, ReplyCreate
-from app.services import event_tracking, lead_scoring
+from app.services import event_tracking, follow_ups, lead_scoring
 from app.services.local_time import is_valid_timezone
 
 logger = logging.getLogger(__name__)
@@ -79,3 +79,20 @@ def update_lead(lead_id: str, data: LeadUpdate, user: dict = Depends(get_current
     if not row:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Contact not found.")
     return row
+
+
+def _lead_email(user_id: str, lead_id: str) -> str:
+    rows = get_supabase().table("leads").select("email").eq("id", lead_id).eq("user_id", user_id).limit(1).execute().data
+    if not rows:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Contact not found.")
+    return rows[0]["email"]
+
+
+@router.get("/leads/{lead_id}/follow-ups", summary="How many of this contact's follow-ups are still waiting, and when the next is due")
+def lead_follow_ups(lead_id: str, user: dict = Depends(get_current_user)):
+    return follow_ups.waiting_for(user["id"], _lead_email(user["id"], lead_id))
+
+
+@router.post("/leads/{lead_id}/follow-ups/send-now", summary="Send this contact's waiting follow-ups now instead of at their scheduled time")
+def lead_follow_ups_send_now(lead_id: str, user: dict = Depends(get_current_user)):
+    return {"queued": follow_ups.send_now_for(user["id"], _lead_email(user["id"], lead_id))}

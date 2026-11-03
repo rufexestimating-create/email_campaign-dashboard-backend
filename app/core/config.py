@@ -26,6 +26,10 @@ class Settings(BaseSettings):
     # two content checks. The code stays in place until the new app takes it over.
     SPAM_DETECTOR_ENABLED: bool = True
 
+    # Sends scheduled campaigns, paced emails and follow-ups. Only the live server should: a laptop pointed at the same
+    # database would send them too, and with a wrong clock it sends them early. Set false in a laptop's .env.
+    RUN_SCHEDULER: bool = True
+
     # Email design: company name in the email header/footer and the accent colour
     BRAND_NAME: str = "Arvistry"
     # CADTRI orange, deep enough for white button text in emails (5.2:1)

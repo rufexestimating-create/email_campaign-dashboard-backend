@@ -1,5 +1,6 @@
 import asyncio
 
+from app.core.config import settings
 from app.db.supabase import is_supabase_configured
 from app.services import follow_ups
 from app.services.campaign_service import campaign_service
@@ -23,6 +24,9 @@ async def campaign_scheduler():
     A second loop sends each running campaign's queued emails. Runs while the API is up."""
     if not is_supabase_configured():
         print("[scheduler] Supabase not configured - campaign scheduler disabled", flush=True)
+        return
+    if not settings.RUN_SCHEDULER:
+        print("[scheduler] RUN_SCHEDULER=false - this copy sends nothing; the live server does the sending", flush=True)
         return
     for recover in (campaign_service.recover_interrupted, follow_ups.recover_interrupted):
         try:

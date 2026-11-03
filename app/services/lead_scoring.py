@@ -292,13 +292,46 @@ def score_user(user_id: str, now: datetime | None = None) -> dict:
     return {"scored": len(updates), "leads_added": added, "model_version": version, "segment_method": segment_method}
 
 
+# How far a contact has got with your emails, best first. A bounce or complaint only wins when nothing better happened.
+ENGAGEMENT_RANK = {"replied": 5, "clicked": 4, "opened": 3, "delivered": 2, "sent": 1}
+
+
+def lead_activity(logs: list[dict]) -> dict[str, dict]:
+    """Per contact (lower-cased email): emails sent, the last send, and their best engagement across all of them."""
+    out: dict[str, dict] = {}
+    for l in logs:
+        if l["status"] != "sent":
+            continue
+        a = out.setdefault(l["recipient"].lower(), {"emails_sent": 0, "last_sent_at": None, "best": None, "problem": None})
+        a["emails_sent"] += 1
+        if not a["last_sent_at"] or l["sent_at"] > a["last_sent_at"]:
+            a["last_sent_at"] = l["sent_at"]
+        event = l.get("last_event") or "sent"
+        if event in ("bounced", "complained"):
+            a["problem"] = "complained" if event == "complained" or a["problem"] == "complained" else "bounced"
+        elif ENGAGEMENT_RANK.get(event, 1) > ENGAGEMENT_RANK.get(a["best"] or "", 0):
+            a["best"] = event
+    return {
+        email: {"emails_sent": a["emails_sent"], "last_sent_at": a["last_sent_at"],
+                "engagement": a["problem"] if a["problem"] and ENGAGEMENT_RANK.get(a["best"] or "", 0) < 3 else a["best"] or "sent"}
+        for email, a in out.items()
+    }
+
+
 def scores_overview(user_id: str) -> dict:
-    """Stored scores for the UI: every lead plus counts per band and segment, and the sales alerts."""
+    """Every lead for the UI, with its activity (emails sent, last send, best engagement), most recently emailed first;
+    plus the stored scores, counts per band and segment, and the sales alerts."""
     from app.db.supabase import get_supabase
 
-    leads = _pages(get_supabase().table("leads").select(
-        "id, email, name, company, persona, lifecycle_stage, p_reply, p_mql, p_sql, score_band, segment, scored_at, score_version"
-    ).eq("user_id", user_id).order("p_sql", desc=True, nullsfirst=False))
+    db = get_supabase()
+    leads = _pages(db.table("leads").select(
+        "id, email, name, company, persona, lifecycle_stage, p_reply, p_mql, p_sql, score_band, segment, scored_at, score_version, created_at"
+    ).eq("user_id", user_id).order("created_at"))
+    activity = lead_activity(_pages(db.table("email_logs").select("recipient, status, last_event, sent_at").eq("user_id", user_id)))
+    none = {"emails_sent": 0, "last_sent_at": None, "engagement": "none"}
+    for l in leads:
+        l.update(activity.get(l["email"].lower(), none))
+    leads.sort(key=lambda l: l["last_sent_at"] or "", reverse=True)
     bundle = load_bundle()
     meta = bundle["meta"] if bundle else None
     return {

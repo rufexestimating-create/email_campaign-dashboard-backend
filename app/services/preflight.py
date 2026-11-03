@@ -26,9 +26,10 @@ from app.services import campaign_advisor, placement_model, send_time, warmup
 from app.services.event_tracking import provider_for
 from app.services.spam_knowledge import ROLE_BASED_PREFIXES
 
-# Same pattern as the spam checker's. With the spam detector switched off this is the only thing the pre-send
-# review still needs from it, so the review doesn't run the spam checker just to find an unsubscribe line.
-UNSUBSCRIBE_RE = re.compile(r"unsubscribe|opt[\s-]?out|stop (?:receiving|getting) (?:these )?emails|manage (?:your )?(?:email )?preferences", re.I)
+# The checks a campaign is reviewed with. Only going over today's sending limit stops a send (those emails would fail
+# anyway); everything else is advice with a one-click fix. Frequency fatigue and the Gmail bulk-sender check are left
+# out: the team's own test inbox gets every campaign, and Gmail's rules apply from 5,000 emails a day.
+BLOCKING_CHECKS = {"volume_spike"}
 
 FATIGUE_HOURS = 72
 WEEKLY_CAP = 3
@@ -379,11 +380,6 @@ def preflight(user_id: str, data: dict, now: datetime | None = None) -> dict:
         contents.append((ab["subject_b"], ab["body_b"]))
     spam_on = settings.SPAM_DETECTOR_ENABLED
     versions = {k: placement_model.score(s, b, data["content_type"], user_id) for k, (s, b) in zip("AB", contents)} if spam_on else {}
-    # Gmail's bulk-sender rules need an unsubscribe line whether or not the spam detector is on
-    has_unsubscribe = all(
-        versions[k]["stats"]["has_unsubscribe"] if spam_on else bool(UNSUBSCRIBE_RE.search(b))
-        for k, (_, b) in zip("AB", contents)
-    )
 
     history = campaign_advisor._history(user_id)
     planned = campaign_advisor._planned_time(data["schedule"], campaign_tz)
@@ -396,15 +392,16 @@ def preflight(user_id: str, data: dict, now: datetime | None = None) -> dict:
     checks = [
         audience_health(recipients, history),
         send_time_check(timing, campaign_tz, data["schedule"]["type"] == "recurring"),
-        frequency_fatigue(recipients, history, now),
-        gmail_domain_risk(recipients, history, has_unsubscribe, now),
         volume_spike(len(recipients), history, now, data["schedule"]["type"] == "now", *warmup.daily_limit(user_id)),
         authentication(sender_domain(data.get("from_email"))),
     ]
     if spam_on:  # the two checks built on the spam score
         worst = max(versions.values(), key=lambda v: v["score"])
-        checks.insert(5, predicted_placement(recipients, worst["score"] / 100, load_placement_labels(user_id), worst["estimate_note"]))
+        checks.insert(3, predicted_placement(recipients, worst["score"] / 100, load_placement_labels(user_id), worst["estimate_note"]))
         checks.append(content_fit(versions))
+    for c in checks:
+        if c["status"] == "fail" and c["id"] not in BLOCKING_CHECKS:
+            c["status"] = "warn"  # advice, not a stop
     counts = Counter(c["status"] for c in checks)
     return {
         "verdict": "fail" if counts["fail"] else "warn" if counts["warn"] else "pass",

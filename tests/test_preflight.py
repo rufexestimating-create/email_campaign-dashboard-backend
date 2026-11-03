@@ -116,7 +116,7 @@ def test_content_fit_offers_unsubscribe_fix():
 
 # ---------- Full run ----------
 
-def test_preflight_runs_all_eight_checks(monkeypatch):
+def test_preflight_runs_the_campaign_and_spam_checks(monkeypatch):
     monkeypatch.setattr(settings, "SPAM_DETECTOR_ENABLED", True)  # the full review, with the spam detector on
     monkeypatch.setattr(campaign_advisor, "_history", lambda user_id: [sent("bounced@gmail.com", 50, "bounced")])
     monkeypatch.setattr(send_time, "load_leads", lambda user_id: {})
@@ -132,16 +132,17 @@ def test_preflight_runs_all_eight_checks(monkeypatch):
         "schedule": {"type": "once", "send_at": datetime(2030, 1, 15, 15, 0, tzinfo=timezone.utc), "timezone": "America/New_York"},
     }, now=NOW)
     ids = [c["id"] for c in result["checks"]]
-    assert ids == ["audience_health", "send_time", "frequency_fatigue", "gmail_domain_risk", "volume_spike", "predicted_placement", "authentication", "content_fit"]
+    assert ids == ["audience_health", "send_time", "volume_spike", "predicted_placement", "authentication", "content_fit"]
     assert all(c["status"] in ("pass", "warn", "fail") and c["message"] for c in result["checks"])
-    assert result["verdict"] == "fail" and result["counts"]["fail"] >= 1  # the bounced contact
+    # A bounced contact is advice with a one-click fix, not a stop
+    assert result["checks"][0]["status"] == "warn" and result["verdict"] == "warn" and result["counts"]["fail"] == 0
     assert result["checks"][0]["action"] == {"type": "remove_recipients", "emails": ["bounced@gmail.com"], "label": "Remove 1 contact"}
-    assert result["checks"][6]["status"] == "pass"
+    assert result["checks"][4]["status"] == "pass"
     assert result["recipient_count"] == 2 and "A" in result["spam"]
 
 
-def test_preflight_without_the_spam_detector_runs_the_six_campaign_checks(monkeypatch):
-    """SPAM_DETECTOR_ENABLED=false: no spam scoring at all, the two content checks drop out, the rest are unchanged."""
+def test_preflight_without_the_spam_detector_runs_the_four_campaign_checks(monkeypatch):
+    """SPAM_DETECTOR_ENABLED=false: no spam scoring at all, just the four campaign checks."""
     monkeypatch.setattr(settings, "SPAM_DETECTOR_ENABLED", False)
     monkeypatch.setattr(pf.placement_model, "score", lambda *a, **k: pytest.fail("spam model must not run"))
     from app.services import spam_checker
@@ -159,9 +160,24 @@ def test_preflight_without_the_spam_detector_runs_the_six_campaign_checks(monkey
         "schedule": {"type": "once", "send_at": datetime(2030, 1, 15, 15, 0, tzinfo=timezone.utc), "timezone": "America/New_York"},
     }
     result = pf.preflight("u1", data, now=NOW)
-    assert [c["id"] for c in result["checks"]] == ["audience_health", "send_time", "frequency_fatigue", "gmail_domain_risk", "volume_spike", "authentication"]
-    assert result["spam"] == {} and result["verdict"] == "fail"  # the bounced contact still blocks the send
-    gmail = next(c for c in result["checks"] if c["id"] == "gmail_domain_risk")
-    assert gmail["status"] != "pass"  # no unsubscribe line is still caught without the spam detector
+    assert [c["id"] for c in result["checks"]] == ["audience_health", "send_time", "volume_spike", "authentication"]
+    assert result["spam"] == {} and result["verdict"] == "warn"  # the bounced contact is flagged, not blocking
     advice = campaign_advisor.precheck("u1", data)
     assert advice["spam"] == {} and not any(r["id"].startswith("spam_") for r in advice["recommendations"])
+
+
+def test_only_going_over_the_daily_limit_blocks_a_send(monkeypatch):
+    monkeypatch.setattr(settings, "SPAM_DETECTOR_ENABLED", False)
+    monkeypatch.setattr(campaign_advisor, "_history", lambda user_id: [])
+    monkeypatch.setattr(send_time, "load_leads", lambda user_id: {})
+    monkeypatch.setattr(send_time, "load_engagement", lambda user_id, days: [])
+    monkeypatch.setattr(send_time, "load_sent_at", lambda user_id, ids: {})
+    monkeypatch.setattr(pf.warmup, "daily_limit", lambda user_id: (2, 1))  # warm-up week 1: 2 emails today
+    monkeypatch.setattr(pf, "dns_txt", fake_dns(GOOD_DNS))
+    result = pf.preflight("u1", {
+        "subject": "Hi", "body": "Hello", "content_type": "text", "recipients": [f"p{i}@builders.com" for i in range(5)],
+        "reply_to": None, "from_email": "hello@arvistry.com", "schedule": {"type": "now", "timezone": "America/New_York"},
+    }, now=NOW)
+    volume = next(c for c in result["checks"] if c["id"] == "volume_spike")
+    assert volume["status"] == "fail" and result["verdict"] == "fail"
+    assert all(c["status"] != "fail" for c in result["checks"] if c["id"] != "volume_spike")

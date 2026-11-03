@@ -22,13 +22,14 @@ from statistics import median
 import httpx
 
 from app.core.config import settings
-from app.services import campaign_advisor, placement_model, send_time, warmup
+from app.services import campaign_advisor, placement_model, warmup
 from app.services.event_tracking import provider_for
 from app.services.spam_knowledge import ROLE_BASED_PREFIXES
 
 # The checks a campaign is reviewed with. Only going over today's sending limit stops a send (those emails would fail
 # anyway); everything else is advice with a one-click fix. Frequency fatigue and the Gmail bulk-sender check are left
-# out: the team's own test inbox gets every campaign, and Gmail's rules apply from 5,000 emails a day.
+# out: the team's own test inbox gets every campaign, and Gmail's rules apply from 5,000 emails a day. The send-time
+# check is left out too: the team picks the time themselves.
 BLOCKING_CHECKS = {"volume_spike"}
 
 FATIGUE_HOURS = 72
@@ -371,7 +372,6 @@ def load_placement_labels(user_id: str) -> list[dict]:
 
 def preflight(user_id: str, data: dict, now: datetime | None = None) -> dict:
     now = now or datetime.now(timezone.utc)
-    campaign_tz = campaign_advisor._zone(data["schedule"].get("timezone") or "UTC")
     recipients = sorted({e.strip().lower() for e in data["recipients"] if e and "@" in e})
 
     ab = data.get("ab_test") or {}
@@ -382,22 +382,14 @@ def preflight(user_id: str, data: dict, now: datetime | None = None) -> dict:
     versions = {k: placement_model.score(s, b, data["content_type"], user_id) for k, (s, b) in zip("AB", contents)} if spam_on else {}
 
     history = campaign_advisor._history(user_id)
-    planned = campaign_advisor._planned_time(data["schedule"], campaign_tz)
-    timing = None
-    if planned and recipients:
-        # Contacts with no ZIP / state are assumed to be on US Eastern time, never the sender's own timezone
-        # (the team may be working from another country while every contact is in the US)
-        timing = send_time.precheck_timing(user_id, recipients, planned.astimezone(timezone.utc), default_tz=send_time.DEFAULT_TIMEZONE)
-
     checks = [
         audience_health(recipients, history),
-        send_time_check(timing, campaign_tz, data["schedule"]["type"] == "recurring"),
         volume_spike(len(recipients), history, now, data["schedule"]["type"] == "now", *warmup.daily_limit(user_id)),
         authentication(sender_domain(data.get("from_email"))),
     ]
     if spam_on:  # the two checks built on the spam score
         worst = max(versions.values(), key=lambda v: v["score"])
-        checks.insert(3, predicted_placement(recipients, worst["score"] / 100, load_placement_labels(user_id), worst["estimate_note"]))
+        checks.insert(2, predicted_placement(recipients, worst["score"] / 100, load_placement_labels(user_id), worst["estimate_note"]))
         checks.append(content_fit(versions))
     for c in checks:
         if c["status"] == "fail" and c["id"] not in BLOCKING_CHECKS:
@@ -409,5 +401,6 @@ def preflight(user_id: str, data: dict, now: datetime | None = None) -> dict:
         "recipient_count": len(recipients),
         "checks": checks,
         "spam": versions,
-        "note": "Placement figures are estimates. No tool can guarantee inbox delivery.",
+        "note": "Placement figures are estimates. No tool can guarantee inbox delivery." if spam_on
+        else "These checks look at who it's going to, today's sending limit and your domain set-up.",
     }

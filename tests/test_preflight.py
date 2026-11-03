@@ -132,17 +132,17 @@ def test_preflight_runs_the_campaign_and_spam_checks(monkeypatch):
         "schedule": {"type": "once", "send_at": datetime(2030, 1, 15, 15, 0, tzinfo=timezone.utc), "timezone": "America/New_York"},
     }, now=NOW)
     ids = [c["id"] for c in result["checks"]]
-    assert ids == ["audience_health", "send_time", "volume_spike", "predicted_placement", "authentication", "content_fit"]
+    assert ids == ["audience_health", "volume_spike", "predicted_placement", "authentication", "content_fit"]
     assert all(c["status"] in ("pass", "warn", "fail") and c["message"] for c in result["checks"])
     # A bounced contact is advice with a one-click fix, not a stop
     assert result["checks"][0]["status"] == "warn" and result["verdict"] == "warn" and result["counts"]["fail"] == 0
     assert result["checks"][0]["action"] == {"type": "remove_recipients", "emails": ["bounced@gmail.com"], "label": "Remove 1 contact"}
-    assert result["checks"][4]["status"] == "pass"
+    assert result["checks"][3]["status"] == "pass"
     assert result["recipient_count"] == 2 and "A" in result["spam"]
 
 
-def test_preflight_without_the_spam_detector_runs_the_four_campaign_checks(monkeypatch):
-    """SPAM_DETECTOR_ENABLED=false: no spam scoring at all, just the four campaign checks."""
+def test_preflight_without_the_spam_detector_runs_the_three_campaign_checks(monkeypatch):
+    """SPAM_DETECTOR_ENABLED=false: no spam scoring at all, just the three campaign checks."""
     monkeypatch.setattr(settings, "SPAM_DETECTOR_ENABLED", False)
     monkeypatch.setattr(pf.placement_model, "score", lambda *a, **k: pytest.fail("spam model must not run"))
     from app.services import spam_checker
@@ -160,7 +160,7 @@ def test_preflight_without_the_spam_detector_runs_the_four_campaign_checks(monke
         "schedule": {"type": "once", "send_at": datetime(2030, 1, 15, 15, 0, tzinfo=timezone.utc), "timezone": "America/New_York"},
     }
     result = pf.preflight("u1", data, now=NOW)
-    assert [c["id"] for c in result["checks"]] == ["audience_health", "send_time", "volume_spike", "authentication"]
+    assert [c["id"] for c in result["checks"]] == ["audience_health", "volume_spike", "authentication"]
     assert result["spam"] == {} and result["verdict"] == "warn"  # the bounced contact is flagged, not blocking
     advice = campaign_advisor.precheck("u1", data)
     assert advice["spam"] == {} and not any(r["id"].startswith("spam_") for r in advice["recommendations"])

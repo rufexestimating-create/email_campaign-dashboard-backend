@@ -132,8 +132,9 @@ select
   count(*) filter (where status = 'sent')                           as sent,
   count(*) filter (where status = 'simulated')                      as simulated,
   count(*) filter (where status = 'failed')                         as failed,
-  count(*) filter (where last_event in ('delivered', 'opened', 'clicked')) as delivered,
-  count(*) filter (where last_event in ('opened', 'clicked'))       as opened,
+  -- A replied email was delivered and opened, so 'replied' counts in both
+  count(*) filter (where last_event in ('delivered', 'opened', 'clicked', 'replied')) as delivered,
+  count(*) filter (where last_event in ('opened', 'clicked', 'replied')) as opened,
   count(*) filter (where last_event = 'clicked')                    as clicked,
   count(*) filter (where last_event in ('bounced', 'complained'))   as bounced
 from public.email_logs

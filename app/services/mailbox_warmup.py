@@ -695,7 +695,23 @@ def _handle_chat(imap, mb: dict, found: dict[str, bytes], landed: str, now: date
 
 
 def _capabilities(imap) -> set[bytes]:
-    return {(c if isinstance(c, bytes) else c.encode()).upper() for c in imap.capabilities}
+    """What the server supports. Asked again after login: imaplib only keeps the greeting's list, and servers such as
+    Hostinger's name MOVE and UIDPLUS only once logged in."""
+    cached = getattr(imap, "_warmup_caps", None)
+    if cached is not None:
+        return cached
+    caps = {(c if isinstance(c, bytes) else c.encode()).upper() for c in imap.capabilities}
+    try:
+        typ, data = imap.capability()
+        if typ == "OK" and data and data[0]:
+            caps |= set(data[0].upper().split())
+    except Exception:
+        pass
+    try:
+        imap._warmup_caps = caps
+    except Exception:
+        pass
+    return caps
 
 
 def _move_to_inbox(imap, uid: bytes) -> bool:

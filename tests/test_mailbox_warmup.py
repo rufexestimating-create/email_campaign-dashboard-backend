@@ -332,3 +332,22 @@ def test_without_move_only_the_rescued_email_is_expunged():
     imap = OldIMAP()
     assert mw._move_to_inbox(imap, b"7") is True
     assert [c[0] for c in imap.calls] == ["copy", "store", "expunge"] and imap.calls[-1] == ("expunge", b"7")
+
+
+def test_move_is_used_when_the_server_names_it_only_after_login():
+    class LoggedInIMAP:
+        capabilities = ("IMAP4REV1", "IDLE")  # the greeting, before login
+
+        def __init__(self):
+            self.calls = []
+
+        def capability(self):
+            return "OK", [b"IMAP4rev1 IDLE UIDPLUS MOVE"]
+
+        def uid(self, command, *args):
+            self.calls.append((command, *args))
+            return "OK", [b""]
+
+    imap = LoggedInIMAP()
+    assert mw._move_to_inbox(imap, b"9") is True
+    assert imap.calls == [("move", b"9", "INBOX")]

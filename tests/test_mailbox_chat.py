@@ -70,6 +70,15 @@ def test_a_group_message_goes_to_everyone_else_and_can_be_answered_privately(mon
     assert server.sent[1]["To"] == "Person1 <user1@arvistry.com>"
 
 
+def test_a_group_needs_three_mailboxes(monkeypatch):
+    _setup(monkeypatch)
+    try:
+        chat.create_group("u1", "Two of us", ["mb1", "mb2"])
+    except ValueError:
+        return
+    raise AssertionError("a two-mailbox group should be refused")
+
+
 def test_only_members_can_send_and_empty_messages_are_refused(monkeypatch):
     _setup(monkeypatch)
     thread = chat.open_direct("u1", "mb1", "mb2")

@@ -19,6 +19,7 @@ from app.services import warmup_content
 MAX_BODY = 5000
 MAX_MESSAGES = 300
 SUBJECT_LENGTH = 60
+GROUP_MIN = 3  # with two mailboxes a group is the same as their private chat
 
 
 def _db():
@@ -142,8 +143,8 @@ def create_group(user_id: str, title: str, mailbox_ids: list[str]) -> dict:
     title = (title or "").strip()
     if not title:
         raise ValueError("Give the group a name.")
-    if len(ids) < 2:
-        raise ValueError("A group needs at least two of your mailboxes.")
+    if len(ids) < GROUP_MIN:
+        raise ValueError(f"A group needs at least {GROUP_MIN} mailboxes; with two, use their private chat.")
     db = _db()
     thread = db.table("chat_threads").insert({"user_id": user_id, "kind": "group", "title": title[:80]}).execute().data[0]
     db.table("chat_members").insert([{"thread_id": thread["id"], "mailbox_id": i} for i in ids]).execute()

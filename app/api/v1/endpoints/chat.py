@@ -16,7 +16,7 @@ class DirectOpen(BaseModel):
 
 class GroupCreate(BaseModel):
     title: str = Field(min_length=1, max_length=80)
-    mailbox_ids: list[str] = Field(min_length=2, max_length=20)
+    mailbox_ids: list[str] = Field(min_length=mailbox_chat.GROUP_MIN, max_length=20)
 
 
 class MessageSend(BaseModel):

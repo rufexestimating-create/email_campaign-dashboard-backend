@@ -225,3 +225,122 @@ def process(imap, mb: dict, junk: str | None, now: datetime, move_to_inbox, quot
             if changes:
                 db.table("newsletter_subscriptions").update(changes).eq("id", sub["id"]).execute()
     return result
+
+
+# ---------- Reading the newsletters in the dashboard ----------
+
+READ_DAYS = 30
+READ_LIMIT = 30
+
+
+def _decoded(value) -> str:
+    from email.header import decode_header, make_header
+
+    try:
+        return str(make_header(decode_header(value or "")))
+    except Exception:
+        return str(value or "")
+
+
+def _iso(date_header: str | None) -> str | None:
+    from email.utils import parsedate_to_datetime
+
+    try:
+        return parsedate_to_datetime(date_header).isoformat() if date_header else None
+    except Exception:
+        return None
+
+
+def html_of(msg: Message) -> str:
+    """The email as HTML for a sandboxed frame: its HTML part, else its text in a <pre>. Links open in a new tab."""
+    html = text = None
+    for part in msg.walk() if msg.is_multipart() else [msg]:
+        kind = part.get_content_type()
+        if kind not in ("text/html", "text/plain") or part.get_filename():
+            continue
+        try:
+            body = (part.get_payload(decode=True) or b"").decode(part.get_content_charset() or "utf-8", errors="replace")
+        except Exception:
+            continue
+        if kind == "text/html" and html is None:
+            html = body
+        elif kind == "text/plain" and text is None:
+            text = body
+    if html is None:
+        from html import escape
+
+        html = f"<pre style='white-space:pre-wrap;font:14px/1.5 sans-serif'>{escape(text or '')}</pre>"
+    return '<base target="_blank">' + html
+
+
+def _subscription(user_id: str, sub_id: str) -> tuple[dict, dict]:
+    from app.services import mailbox_warmup as mw
+
+    rows = _db().table("newsletter_subscriptions").select("*").eq("id", sub_id).eq("user_id", user_id).limit(1).execute().data
+    if not rows:
+        raise LookupError("Subscription not found.")
+    mb = mw.get_mailbox(user_id, rows[0]["mailbox_id"], with_password=True)
+    if not mb:
+        raise LookupError("Mailbox not found.")
+    return rows[0], mb
+
+
+def _open_inbox(mb: dict):
+    from app.services import mailbox_warmup as mw
+
+    imap = mw._imap(mb, mw.decrypt(mb["password_enc"]))
+    imap.select('"INBOX"', readonly=True)
+    return imap
+
+
+def list_emails(user_id: str, sub_id: str) -> list[dict]:
+    """The newsletter's emails in the mailbox's Inbox (last 30 days, newest first). Only mail from its sender domains."""
+    from app.services import mailbox_warmup as mw
+
+    sub, mb = _subscription(user_id, sub_id)
+    domains = clean_domains(sub["sender_domains"])
+    since = (datetime.now().astimezone() - timedelta(days=READ_DAYS)).strftime("%d-%b-%Y")
+    imap = _open_inbox(mb)
+    try:
+        uids: set[bytes] = set()
+        for d in domains:
+            _, data = imap.uid("search", None, "SINCE", since, "FROM", f'"{d}"')
+            uids |= set((data[0] or b"").split()) if data else set()
+        newest = sorted(uids, key=int, reverse=True)[:READ_LIMIT]
+        if not newest:
+            return []
+        _, parts = imap.uid("fetch", b",".join(newest), "(FLAGS BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)])")
+        out = []
+        for part in parts or []:
+            if not isinstance(part, tuple):
+                continue
+            uid = re.search(rb"UID (\d+)", part[0])
+            head = email.message_from_bytes(part[1] or b"")
+            if not uid or not domain_matches(sender_domain(head), domains):
+                continue
+            out.append({"uid": uid.group(1).decode(), "from": _decoded(head.get("From")), "subject": _decoded(head.get("Subject")) or "(no subject)",
+                        "date": _iso(head.get("Date")), "seen": b"\Seen" in part[0]})
+        return sorted(out, key=lambda e: int(e["uid"]), reverse=True)
+    finally:
+        mw._logout(imap)
+
+
+def read_email(user_id: str, sub_id: str, uid: str) -> dict:
+    from app.services import mailbox_warmup as mw
+
+    if not uid.isdigit():
+        raise LookupError("Email not found.")
+    sub, mb = _subscription(user_id, sub_id)
+    imap = _open_inbox(mb)
+    try:
+        _, parts = imap.uid("fetch", uid.encode(), "(BODY.PEEK[])")
+        raw = next((p[1] for p in parts or [] if isinstance(p, tuple)), None)
+    finally:
+        mw._logout(imap)
+    if not raw:
+        raise LookupError("Email not found. It may have been deleted.")
+    msg = email.message_from_bytes(raw)
+    if not domain_matches(sender_domain(msg), clean_domains(sub["sender_domains"])):
+        raise LookupError("Email not found.")  # only this newsletter's mail can be read here
+    return {"uid": uid, "from": _decoded(msg.get("From")), "subject": _decoded(msg.get("Subject")) or "(no subject)",
+            "date": _iso(msg.get("Date")), "html": html_of(msg)}

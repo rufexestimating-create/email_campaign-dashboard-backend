@@ -32,6 +32,26 @@ def newsletter_add(mailbox_id: str, data: NewsletterAdd, user: dict = Depends(ge
         raise _bad(e)
 
 
+@router.get("/newsletters/{sub_id}/emails", summary="A newsletter's emails in the mailbox's inbox (last 30 days)")
+def newsletter_emails(sub_id: str, user: dict = Depends(get_current_user)):
+    try:
+        return newsletters.list_emails(user["id"], sub_id)
+    except LookupError as e:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(e))
+    except (MailboxError, ValueError) as e:
+        raise _bad(e)
+
+
+@router.get("/newsletters/{sub_id}/emails/{uid}", summary="One newsletter email, to read in the dashboard")
+def newsletter_email(sub_id: str, uid: str, user: dict = Depends(get_current_user)):
+    try:
+        return newsletters.read_email(user["id"], sub_id, uid)
+    except LookupError as e:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(e))
+    except (MailboxError, ValueError) as e:
+        raise _bad(e)
+
+
 @router.delete("/newsletters/{sub_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Stop handling a newsletter for a mailbox")
 def newsletter_remove(sub_id: str, user: dict = Depends(get_current_user)):
     if not newsletters.remove_subscription(user["id"], sub_id):

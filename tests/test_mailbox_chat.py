@@ -163,3 +163,40 @@ def test_newsletters_are_confirmed_read_and_rescued(monkeypatch):
     assert result == {"received": 2, "rescued": 1, "confirmed": 1}
     assert sub["status"] == "confirmed" and sub["received_count"] == 2 and sub["rescued_count"] == 1
     assert ('"INBOX"', b"1", "(\\Seen)") in imap.flags and ('"INBOX.Spam"', b"7") in imap.moved
+
+
+class ReadIMAP:
+    """Inbox: a Dezeen issue (uid 5) and someone else's email (uid 6)."""
+
+    def __init__(self):
+        self.mail = {
+            b"5": b"From: Dezeen <mail@dezeen.com>\r\nSubject: =?utf-8?q?Today=E2=80=99s_news?=\r\nDate: Wed, 04 Nov 2026 19:03:16 +0000\r\n"
+                  b"Content-Type: text/html\r\n\r\n<p>Hello <a href='https://dezeen.com'>read</a></p>\r\n",
+            b"6": b"From: Client <boss@client.com>\r\nSubject: Private\r\n\r\nsecret\r\n",
+        }
+
+    def uid(self, command, *args):
+        if command == "search":
+            return "OK", [b"5" if "dezeen.com" in args[-1] else b""]
+        if command == "fetch":
+            uids = args[0].split(b",")
+            return "OK", [(b"1 (UID %s FLAGS (\Seen) BODY[] {9}" % u, self.mail[u]) for u in uids]
+        return "OK", [b""]
+
+
+def test_a_newsletter_can_be_read_in_the_dashboard_but_no_other_mail(monkeypatch):
+    sub = {"id": "s1", "user_id": "u1", "mailbox_id": "mb1", "sender_domains": "dezeen.com"}
+    monkeypatch.setattr(mw, "_db", lambda: FakeDB({"newsletter_subscriptions": [sub]}))
+    monkeypatch.setattr(mw, "get_mailbox", lambda u, m, with_password=False: {"id": m, "password_enc": mw.encrypt("pw")})
+    monkeypatch.setattr(nl, "_open_inbox", lambda mb: ReadIMAP())
+
+    listed = nl.list_emails("u1", "s1")
+    assert [(e["uid"], e["subject"], e["seen"]) for e in listed] == [("5", "Today’s news", True)]
+    one = nl.read_email("u1", "s1", "5")
+    assert one["html"].startswith('<base target="_blank">') and "Hello" in one["html"]
+    for uid in ("6", "1 OR 2"):
+        try:
+            nl.read_email("u1", "s1", uid)
+        except LookupError:
+            continue
+        raise AssertionError(f"uid {uid} must not be readable")

@@ -49,10 +49,16 @@ SEND_PER_TICK = 20
 LOOKBACK_DAYS = 3
 MAX_MAILBOXES = 20
 TIMEOUT = 30
+# A server that can't be reached (timeout, network blip) is tried again later; only after this many failures in a row
+# is the mailbox set to 'error'. A wrong password stops it at once.
+FAILS_BEFORE_ERROR = 3
+RETRY_MINUTES = 10
+MAX_SEND_TRIES = 3              # an email that fails to send is tried this many times in all
 
 HOSTINGER = {"smtp_host": "smtp.hostinger.com", "smtp_port": 465, "imap_host": "imap.hostinger.com", "imap_port": 993}
 
 _last = {"plan": 0.0, "check": 0.0}
+_failures: dict[str, int] = {}  # mailbox id -> unreachable-server failures in a row
 
 
 def _db():
@@ -226,7 +232,11 @@ def _local_date(value, tz: ZoneInfo) -> date | None:
 # ---------- SMTP / IMAP ----------
 
 class MailboxError(Exception):
-    """A problem with the mailbox itself (wrong password, server unreachable): the mailbox is set to 'error'."""
+    """A problem with the mailbox itself. `transient` (server unreachable) is retried; a wrong password sets 'error'."""
+
+    def __init__(self, message: str, transient: bool = False):
+        super().__init__(message)
+        self.transient = transient
 
 
 def _smtp(mb: dict, password: str) -> smtplib.SMTP:
@@ -241,14 +251,14 @@ def _smtp(mb: dict, password: str) -> smtplib.SMTP:
     except smtplib.SMTPAuthenticationError:
         raise MailboxError("Sending failed: the email or password is wrong.")
     except (socket.timeout, OSError, smtplib.SMTPException) as e:
-        raise MailboxError(f"Couldn't reach the sending server {mb['smtp_host']}:{mb['smtp_port']} ({e}).")
+        raise MailboxError(f"Couldn't reach the sending server {mb['smtp_host']}:{mb['smtp_port']} ({e}).", transient=True)
 
 
 def _imap(mb: dict, password: str) -> imaplib.IMAP4_SSL:
     try:
         imap = imaplib.IMAP4_SSL(mb["imap_host"], int(mb["imap_port"]), timeout=TIMEOUT)
     except (socket.timeout, OSError) as e:
-        raise MailboxError(f"Couldn't reach the inbox server {mb['imap_host']}:{mb['imap_port']} ({e}).")
+        raise MailboxError(f"Couldn't reach the inbox server {mb['imap_host']}:{mb['imap_port']} ({e}).", transient=True)
     try:
         imap.login(mb["username"], password)
     except imaplib.IMAP4.error:
@@ -441,6 +451,39 @@ def _set_error(mailbox_id: str, error: str):
     _cancel_scheduled(mailbox_id)
 
 
+def _mailbox_failed(mailbox_id: str, error: Exception) -> bool:
+    """Records a failure. Returns True if the mailbox was set to 'error', False if it will simply be tried again."""
+    if getattr(error, "transient", False):
+        _failures[mailbox_id] = _failures.get(mailbox_id, 0) + 1
+        if _failures[mailbox_id] < FAILS_BEFORE_ERROR:
+            logger.warning("Warm-up mailbox %s (try %s of %s): %s", mailbox_id, _failures[mailbox_id], FAILS_BEFORE_ERROR, error)
+            return False
+    _failures.pop(mailbox_id, None)
+    _set_error(mailbox_id, str(error))
+    return True
+
+
+def _later(now: datetime, minutes: float = RETRY_MINUTES) -> str:
+    return (now + timedelta(minutes=minutes)).isoformat()
+
+
+def _send_tries(error: str | None) -> int:
+    """How often an email was already tried: kept as a '[try N]' prefix of its error, so no extra column is needed."""
+    m = re.match(r"\[try (\d+)\]", error or "")
+    return int(m.group(1)) if m else 0
+
+
+def office_hours(at: datetime, tz: ZoneInfo, rng: random.Random) -> datetime:
+    """`at` if it falls in office hours; else early in the next office hours (a reply isn't sent at 9 pm)."""
+    local = at.astimezone(tz)
+    opens = datetime.combine(local.date(), datetime.min.time(), tz).replace(hour=WINDOW[0])
+    if local.hour >= WINDOW[1]:
+        opens += timedelta(days=1)
+    elif local >= opens:
+        return at
+    return (opens + timedelta(minutes=rng.uniform(0, 90))).astimezone(timezone.utc)
+
+
 # ---------- Scheduler ----------
 
 def run(now: datetime | None = None, force: bool = False):
@@ -459,8 +502,9 @@ def run(now: datetime | None = None, force: bool = False):
         for mb in mailboxes:
             try:
                 check_inbox(mb, mailboxes, now)
+                _failures.pop(mb["id"], None)
             except MailboxError as e:
-                _set_error(mb["id"], str(e))
+                _mailbox_failed(mb["id"], e)
             except Exception as e:
                 logger.exception("Warm-up inbox check failed for %s: %s", mb["email"], e)
 
@@ -512,11 +556,19 @@ def send_due(mailboxes: list[dict], now: datetime) -> int:
         parents = {p["id"]: p["message_id"] for p in db.table("warmup_messages").select("id, message_id").in_("id", parent_ids).execute().data}
     sent = 0
     servers: dict[str, smtplib.SMTP] = {}
+    postponed: set[str] = set()  # senders whose server couldn't be reached this tick: their emails wait a few minutes
+    table = lambda: db.table("warmup_messages")  # noqa: E731
     try:
         for row in due:
             sender, recipient = active.get(row["from_mailbox_id"]), active.get(row["to_mailbox_id"])
             if not sender or not recipient:
-                db.table("warmup_messages").update({"status": "cancelled"}).eq("id", row["id"]).execute()
+                table().update({"status": "cancelled"}).eq("id", row["id"]).execute()
+                continue
+            if sender["id"] in postponed:
+                table().update({"scheduled_at": _later(now)}).eq("id", row["id"]).execute()
+                continue
+            # Claim the email before sending, so a second copy of the scheduler can't send it too
+            if not table().update({"status": "sent"}).eq("id", row["id"]).eq("status", "scheduled").execute().data:
                 continue
             row["message_id"] = make_msgid(idstring=uuid.uuid4().hex[:12], domain=sender["email"].split("@")[1])
             try:
@@ -524,15 +576,27 @@ def send_due(mailboxes: list[dict], now: datetime) -> int:
                     servers[sender["id"]] = _smtp(sender, decrypt(sender["password_enc"]))
                 servers[sender["id"]].send_message(build_message(sender, recipient, row, parents.get(row.get("parent_id"))))
             except (MailboxError, ValueError) as e:
-                _set_error(sender["id"], str(e))
-                active.pop(sender["id"], None)
+                if isinstance(e, MailboxError) and not _mailbox_failed(sender["id"], e):
+                    postponed.add(sender["id"])
+                    table().update({"status": "scheduled", "scheduled_at": _later(now)}).eq("id", row["id"]).execute()
+                else:
+                    if isinstance(e, ValueError):
+                        _set_error(sender["id"], str(e))
+                    active.pop(sender["id"], None)
+                    table().update({"status": "cancelled", "error": str(e)[:500]}).eq("id", row["id"]).execute()
                 continue
             except Exception as e:
-                db.table("warmup_messages").update({"status": "failed", "error": str(e)[:500]}).eq("id", row["id"]).execute()
+                tries = _send_tries(row.get("error")) + 1
+                error = f"[try {tries}] {e}"[:500]
+                if tries < MAX_SEND_TRIES:
+                    table().update({"status": "scheduled", "scheduled_at": _later(now), "error": error}).eq("id", row["id"]).execute()
+                else:
+                    table().update({"status": "failed", "error": error}).eq("id", row["id"]).execute()
                 servers.pop(sender["id"], None)
                 continue
-            db.table("warmup_messages").update({"status": "sent", "sent_at": datetime.now(timezone.utc).isoformat(),
-                                                "message_id": row["message_id"]}).eq("id", row["id"]).execute()
+            _failures.pop(sender["id"], None)
+            table().update({"status": "sent", "sent_at": datetime.now(timezone.utc).isoformat(),
+                            "message_id": row["message_id"], "error": None}).eq("id", row["id"]).execute()
             sent += 1
     finally:
         for server in servers.values():
@@ -598,8 +662,6 @@ def check_inbox(mb: dict, mailboxes: list[dict], now: datetime, rng: random.Rand
                 result[landed] += 1
                 if row["kind"] == "initial" and rng.random() < REPLY_RATE:
                     result["replies"] += _schedule_reply(row, mb, mailboxes, now, rng)
-            if landed == "spam":
-                imap.expunge()
     finally:
         _logout(imap)
     db.table("mailboxes").update({"last_checked_at": now.isoformat()}).eq("id", mb["id"]).execute()
@@ -608,12 +670,21 @@ def check_inbox(mb: dict, mailboxes: list[dict], now: datetime, rng: random.Rand
     return result
 
 
+def _capabilities(imap) -> set[bytes]:
+    return {(c if isinstance(c, bytes) else c.encode()).upper() for c in imap.capabilities}
+
+
 def _move_to_inbox(imap, uid: bytes) -> bool:
+    """Moves one email from the selected (spam) folder to the Inbox. Never expunges the whole folder: a plain EXPUNGE
+    would also erase anything else in Spam the user had marked deleted."""
     try:
-        if b"MOVE" in b" ".join(c if isinstance(c, bytes) else c.encode() for c in imap.capabilities):
+        caps = _capabilities(imap)
+        if b"MOVE" in caps:
             return imap.uid("move", uid, "INBOX")[0] == "OK"
         if imap.uid("copy", uid, "INBOX")[0] == "OK":
             imap.uid("store", uid, "+FLAGS", "(\\Deleted)")
+            if b"UIDPLUS" in caps:
+                imap.uid("expunge", uid)  # removes only this email
             return True
     except Exception as e:
         logger.warning("Couldn't move a warm-up email out of spam: %s", e)
@@ -628,10 +699,11 @@ def _schedule_reply(original: dict, me: dict, mailboxes: list[dict], now: dateti
         rng, original["subject"],
         warmup_content.first_name(me.get("display_name"), me["email"]),
         warmup_content.first_name(partner.get("display_name"), partner["email"]))
-    at = now + timedelta(minutes=rng.uniform(*REPLY_DELAY_MIN))
+    tz = _tz()
+    at = office_hours(now + timedelta(minutes=rng.uniform(*REPLY_DELAY_MIN)), tz, rng)
     _db().table("warmup_messages").insert({
         "user_id": me["user_id"], "from_mailbox_id": me["id"], "to_mailbox_id": partner["id"], "kind": "reply",
-        "parent_id": original["id"], "plan_date": at.astimezone(_tz()).date().isoformat(),
+        "parent_id": original["id"], "plan_date": at.astimezone(tz).date().isoformat(),
         "subject": subject, "body": body, "scheduled_at": at.isoformat(),
     }).execute()
     return 1

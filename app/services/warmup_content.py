@@ -31,6 +31,21 @@ SUBJECTS = [
     "Draft proposal",
     "Office hours over the holiday",
     "Supplier quote",
+    "Monday catch-up",
+    "Question about the contract",
+    "Leave next month",
+    "New printer in the office",
+    "Timesheet for this week",
+    "Bathroom tile samples",
+    "Parking at the site",
+    "Training session on Wednesday",
+    "Shared folder access",
+    "Delivery date for the cabinets",
+    "Landscape plan",
+    "Lighting options",
+    "Reminder: team meeting",
+    "Budget for the Johnson project",
+    "Feedback on the 3D render",
 ]
 
 GREETINGS = ["Hi {name},", "Hello {name},", "Hey {name},", "Hi {name},", "Good morning {name},", "{name},"]
@@ -56,6 +71,21 @@ BODIES = [
     "Is lunch on Friday still on? I was thinking of the place near the office around 1.",
     "I checked the invoice and I think the hours for the second week were counted twice. Could you have a look before we send it?",
     "The builder asked whether we could add a small storage room under the stairs. I think there's just enough space.",
+    "I've added you to the shared folder for the new project. Let me know if you can't open anything in there.",
+    "Could you fill in your timesheet by Friday? Accounts want to close the month early this time.",
+    "The cabinet supplier says delivery will slip by about a week. I've told the client, and they're fine with it.",
+    "I'm planning to take a few days off at the end of next month. Would you be able to cover the Tuesday meetings?",
+    "The new render looks great. The only thing I'd change is the colour of the front door, it feels a bit dark.",
+    "There's a short training session on the new drawing software on Wednesday at 3. It should take about an hour.",
+    "The client wants to see two or three lighting options for the dining room before they decide.",
+    "I had a look at the contract and there's one clause about payment dates I'd like to go over with you.",
+    "Parking near the site is tight this week because of the road works, so it might be easier to come by train.",
+    "I've booked the meeting room for Monday morning. Coffee will be there from half past nine.",
+    "The landscape architect sent over the first draft of the garden plan. I've saved it in the project folder.",
+    "We're still waiting on the tile samples for the bathroom. The supplier promised them by Thursday.",
+    "Could you double-check the room sizes on the second floor? The client measured one of the bedrooms and got a different number.",
+    "The budget for the Johnson project is a little tight, so we may need to suggest a cheaper flooring option.",
+    "I've moved our weekly catch-up to 10 on Monday, since a few people are out on Friday.",
 ]
 
 QUESTIONS = [
@@ -87,6 +117,14 @@ REPLIES = [
     "Perfect, thank you.",
     "Noted. I'll let the client know.",
     "Makes sense. I'll update the plans today.",
+    "No problem, I can cover those.",
+    "Thanks, I'll look at it before the meeting.",
+    "Good to know. I'll plan around it.",
+    "Will do. I'll send it over by Friday.",
+    "Thanks for sorting that out.",
+    "Sounds like a plan. Let's catch up on Monday.",
+    "Got it. I'll let the team know.",
+    "Agreed, let's keep it simple.",
 ]
 
 

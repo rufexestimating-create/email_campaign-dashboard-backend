@@ -141,6 +141,16 @@ class FakeTable:
         self.filters.append(lambda r: r.get(col) is None)
         return self
 
+    def lte(self, col, val):
+        self.filters.append(lambda r: r.get(col) <= val)
+        return self
+
+    def order(self, *_a, **_k):
+        return self
+
+    def limit(self, *_a):
+        return self
+
     def execute(self):
         rows = self.db.setdefault(self.name, [])
         if self.op == "insert":
@@ -224,3 +234,100 @@ def test_inbox_bot_records_rescues_reads_and_answers(monkeypatch):
 
     # A second pass finds nothing new: each email is handled once
     assert mw.check_inbox(boxes[1], boxes, NOW, random.Random(1)) == {"inbox": 0, "spam": 0, "replies": 0}
+
+
+# ---------- Replies in office hours, retries, sending ----------
+
+def test_replies_wait_for_office_hours():
+    rng = random.Random(1)
+    at_noon = datetime(2026, 11, 3, 7, 0, tzinfo=timezone.utc)  # 12:00 Karachi
+    assert mw.office_hours(at_noon, TZ, rng) == at_noon
+    for late in (datetime(2026, 11, 3, 15, 30, tzinfo=timezone.utc), datetime(2026, 11, 3, 1, 0, tzinfo=timezone.utc)):
+        local = mw.office_hours(late, TZ, rng).astimezone(TZ)  # 20:30 -> next morning, 06:00 -> same morning
+        assert mw.WINDOW[0] <= local.hour < mw.WINDOW[1] and local > late.astimezone(TZ)
+    assert mw.office_hours(datetime(2026, 11, 3, 15, 30, tzinfo=timezone.utc), TZ, rng).astimezone(TZ).date() == date(2026, 11, 4)
+
+
+def test_an_unreachable_server_is_retried_before_the_mailbox_is_stopped(monkeypatch):
+    errors = []
+    monkeypatch.setattr(mw, "_set_error", lambda mid, e: errors.append(mid))
+    monkeypatch.setattr(mw, "_failures", {})
+    blip = mw.MailboxError("timeout", transient=True)
+    assert [mw._mailbox_failed("mb1", blip) for _ in range(mw.FAILS_BEFORE_ERROR)] == [False] * (mw.FAILS_BEFORE_ERROR - 1) + [True]
+    assert errors == ["mb1"]
+    assert mw._mailbox_failed("mb2", mw.MailboxError("wrong password")) is True  # a wrong password stops it at once
+
+
+def _due(i, **extra):
+    return {"id": f"m{i}", "from_mailbox_id": "mb1", "to_mailbox_id": "mb2", "kind": "initial", "subject": "Notes", "body": "Hi",
+            "status": "scheduled", "scheduled_at": "2026-11-03T04:00:00+00:00", "parent_id": None, "error": None, **extra}
+
+
+class FakeSMTP:
+    def __init__(self, fail=None):
+        self.sent, self.fail = [], fail
+
+    def send_message(self, msg):
+        if self.fail:
+            raise self.fail
+        self.sent.append(msg)
+
+    def quit(self):
+        pass
+
+
+def _send_setup(monkeypatch, rows, smtp):
+    boxes = [mailbox(1, password_enc=mw.encrypt("pw")), mailbox(2, password_enc=mw.encrypt("pw"))]
+    tables = {"warmup_messages": rows, "mailboxes": [dict(b) for b in boxes]}
+    monkeypatch.setattr(mw, "_db", lambda: FakeDB(tables))
+    monkeypatch.setattr(mw, "_failures", {})
+    monkeypatch.setattr(mw, "_smtp", smtp)
+    return boxes
+
+
+def test_sending_marks_each_email_sent_once(monkeypatch):
+    server = FakeSMTP()
+    rows = [_due(1), _due(2, status="sent")]  # m2 was already claimed by another copy of the scheduler
+    boxes = _send_setup(monkeypatch, rows, lambda mb, pw: server)
+    assert mw.send_due(boxes, NOW) == 1 and len(server.sent) == 1
+    assert rows[0]["status"] == "sent" and rows[0]["sent_at"] and rows[0]["message_id"]
+
+
+def test_a_failed_send_is_tried_again_then_given_up(monkeypatch):
+    rows = [_due(1)]
+    boxes = _send_setup(monkeypatch, rows, lambda mb, pw: FakeSMTP(fail=RuntimeError("421 try later")))
+    for attempt in range(1, mw.MAX_SEND_TRIES + 1):
+        rows[0]["scheduled_at"] = "2026-11-03T04:00:00+00:00"
+        mw.send_due(boxes, NOW)
+        assert rows[0]["error"].startswith(f"[try {attempt}]")
+    assert rows[0]["status"] == "failed"
+
+
+def test_an_unreachable_server_postpones_instead_of_stopping(monkeypatch):
+    rows = [_due(1), _due(2)]
+
+    def down(mb, pw):
+        raise mw.MailboxError("timeout", transient=True)
+
+    boxes = _send_setup(monkeypatch, rows, down)
+    assert mw.send_due(boxes, NOW) == 0
+    assert all(r["status"] == "scheduled" and r["scheduled_at"] > NOW.isoformat() for r in rows)
+
+
+def test_without_move_only_the_rescued_email_is_expunged():
+    class OldIMAP:
+        capabilities = ("IMAP4REV1", "UIDPLUS")
+
+        def __init__(self):
+            self.calls = []
+
+        def uid(self, command, *args):
+            self.calls.append((command, *args))
+            return "OK", [b""]
+
+        def expunge(self):
+            raise AssertionError("a folder-wide EXPUNGE would erase the user's own deleted mail")
+
+    imap = OldIMAP()
+    assert mw._move_to_inbox(imap, b"7") is True
+    assert [c[0] for c in imap.calls] == ["copy", "store", "expunge"] and imap.calls[-1] == ("expunge", b"7")

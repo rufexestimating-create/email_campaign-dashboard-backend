@@ -222,7 +222,7 @@ def test_inbox_bot_records_rescues_reads_and_answers(monkeypatch):
 
     result = mw.check_inbox(boxes[1], boxes, NOW, random.Random(1))
 
-    assert result == {"inbox": 1, "spam": 1, "replies": 2}
+    assert {k: result[k] for k in ("inbox", "spam", "replies")} == {"inbox": 1, "spam": 1, "replies": 2}
     inbox_row, spam_row = tables["warmup_messages"][:2]
     assert inbox_row["landed_in"] == "inbox" and not inbox_row["rescued"]
     assert spam_row["landed_in"] == "spam" and spam_row["rescued"]
@@ -233,7 +233,8 @@ def test_inbox_bot_records_rescues_reads_and_answers(monkeypatch):
     assert all(r["subject"] == "Re: Notes from today" for r in replies)
 
     # A second pass finds nothing new: each email is handled once
-    assert mw.check_inbox(boxes[1], boxes, NOW, random.Random(1)) == {"inbox": 0, "spam": 0, "replies": 0}
+    again = mw.check_inbox(boxes[1], boxes, NOW, random.Random(1))
+    assert {k: again[k] for k in ("inbox", "spam", "replies")} == {"inbox": 0, "spam": 0, "replies": 0}
 
 
 # ---------- Replies in office hours, retries, sending ----------

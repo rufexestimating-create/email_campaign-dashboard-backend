@@ -662,12 +662,36 @@ def check_inbox(mb: dict, mailboxes: list[dict], now: datetime, rng: random.Rand
                 result[landed] += 1
                 if row["kind"] == "initial" and rng.random() < REPLY_RATE:
                     result["replies"] += _schedule_reply(row, mb, mailboxes, now, rng)
+            result["chat"] = result.get("chat", 0) + _handle_chat(imap, mb, found, landed, now)
+        try:
+            from app.services import newsletters
+
+            result["newsletters"] = newsletters.process(imap, mb, junk, now, _move_to_inbox, _quote)
+        except Exception as e:  # newsletters are extra: a problem here must not stop the warm-up
+            logger.warning("Newsletter check failed for %s: %s", mb["email"], e)
     finally:
         _logout(imap)
     db.table("mailboxes").update({"last_checked_at": now.isoformat()}).eq("id", mb["id"]).execute()
     if result["inbox"] or result["spam"]:
         print(f"[warm-up] {mb['email']}: {result['inbox']} in inbox, {result['spam']} rescued from spam, {result['replies']} replies planned", flush=True)
     return result
+
+
+def _handle_chat(imap, mb: dict, found: dict[str, bytes], landed: str, now: datetime) -> int:
+    """Dashboard chat messages (mailbox_chat) in the selected folder: read, rescued from spam, receipt recorded."""
+    try:
+        from app.services import mailbox_chat
+
+        pending = mailbox_chat.pending_receipts(list(found), mb["id"])
+    except Exception as e:  # chat tables missing or a database hiccup: the warm-up goes on
+        logger.warning("Chat check failed for %s: %s", mb["email"], e)
+        return 0
+    for rec in pending:
+        uid = found[rec["message_id"]]
+        imap.uid("store", uid, "+FLAGS", "(\\Seen)")
+        rescued = _move_to_inbox(imap, uid) if landed == "spam" else False
+        mailbox_chat.record_receipt(rec["message_id"], mb["id"], landed, rescued, now)
+    return len(pending)
 
 
 def _capabilities(imap) -> set[bytes]:

@@ -1,0 +1,227 @@
+"""Newsletters for the warm-up mailboxes: ordinary outside mail that a real inbox receives and reads.
+
+Subscribing is done by a person (the dashboard lists well-known newsletters with their signup pages): signup forms
+are protected against bots, and providers distrust addresses that robots sign up. Once a mailbox is marked as
+subscribed, the warm-up inbox check (mailbox_warmup.check_inbox) handles that newsletter's mail by itself:
+
+- the confirmation email ("please confirm your subscription"): its confirm link is opened, once
+- each newsletter: moved out of Spam if it landed there, and marked read
+- counts per subscription: received, rescued, last received
+
+Only mail from the sender domains of a subscription is touched; other mail in the mailbox is left alone.
+"""
+import email
+import ipaddress
+import logging
+import re
+import socket
+from datetime import datetime, timedelta
+from email.message import Message
+from email.utils import parseaddr
+from html import unescape
+from urllib.parse import urlparse
+
+import httpx
+
+logger = logging.getLogger(__name__)
+
+LOOKBACK_DAYS = 3
+MAX_PER_CHECK = 30
+CONFIRM_WORDS = re.compile(r"confirm|verify|verif|activate|opt[- ]?in|validate|complete your (sign ?up|subscription)", re.I)
+URL_RE = re.compile(r"""https?://[^\s"'<>)\]]+""", re.I)
+# Services that send newsletters on other sites' behalf: their confirm links may sit on these domains
+ESP_DOMAINS = ("list-manage.com", "mailchimp.com", "substack.com", "beehiiv.com", "convertkit.com", "kit.com", "ck.page",
+               "mailerlite.com", "createsend.com", "hubspot.com", "hs-sites.com", "klaviyo.com", "sendgrid.net", "sendinblue.com",
+               "brevo.com", "mailjet.com", "campaign-archive.com", "emailoctopus.com", "buttondown.email", "ghost.io")
+
+# Well-known newsletters, mostly design, architecture and business, so the mail suits HM Design Group's mailboxes.
+# `domains` are the usual sender domains; they can be changed when a subscription is saved.
+CATALOG = [
+    {"name": "ArchDaily", "topic": "Architecture", "url": "https://www.archdaily.com", "domains": ["archdaily.com"]},
+    {"name": "Dezeen", "topic": "Architecture & design", "url": "https://www.dezeen.com/newsletter/", "domains": ["dezeen.com"]},
+    {"name": "Architectural Digest", "topic": "Interiors", "url": "https://www.architecturaldigest.com/newsletter", "domains": ["architecturaldigest.com", "condenast.com"]},
+    {"name": "Houzz", "topic": "Home design", "url": "https://www.houzz.com", "domains": ["houzz.com"]},
+    {"name": "Morning Brew", "topic": "Business news", "url": "https://www.morningbrew.com/daily", "domains": ["morningbrew.com"]},
+    {"name": "The Hustle", "topic": "Business", "url": "https://thehustle.co", "domains": ["thehustle.co", "hubspot.com"]},
+    {"name": "TLDR", "topic": "Tech news", "url": "https://tldr.tech", "domains": ["tldrnewsletter.com", "tldr.tech"]},
+    {"name": "Smashing Magazine", "topic": "Web design", "url": "https://www.smashingmagazine.com/the-smashing-newsletter/", "domains": ["smashingmagazine.com"]},
+    {"name": "Product Hunt", "topic": "New products", "url": "https://www.producthunt.com/newsletters", "domains": ["producthunt.com"]},
+    {"name": "Medium Daily Digest", "topic": "Articles", "url": "https://medium.com", "domains": ["medium.com"]},
+    {"name": "Canva", "topic": "Design tips", "url": "https://www.canva.com", "domains": ["canva.com"]},
+    {"name": "Notion", "topic": "Productivity", "url": "https://www.notion.so", "domains": ["notion.so", "notion.com", "makenotion.com"]},
+]
+
+
+def _db():
+    from app.services import mailbox_warmup  # one place to reach the database (tests replace it there)
+
+    return mailbox_warmup._db()
+
+
+# ---------- Pure ----------
+
+def clean_domains(value) -> list[str]:
+    """'Morningbrew.com, https://news.x.com/a' -> ['morningbrew.com', 'news.x.com']"""
+    items = value if isinstance(value, list) else re.split(r"[\s,;]+", value or "")
+    out = []
+    for item in items:
+        d = item.strip().lower()
+        if "//" in d:
+            d = urlparse(d).hostname or ""
+        d = d.split("@")[-1].strip("./")
+        if d.startswith("www."):
+            d = d[4:]
+        if "." in d and d not in out:
+            out.append(d)
+    return out
+
+
+def domain_matches(host: str, domains: list[str]) -> bool:
+    host = (host or "").lower().rstrip(".")
+    return any(host == d or host.endswith("." + d) for d in domains)
+
+
+def sender_domain(msg: Message) -> str:
+    return parseaddr(msg.get("From", ""))[1].rpartition("@")[2].lower()
+
+
+def is_confirmation(msg: Message, text: str) -> bool:
+    return bool(CONFIRM_WORDS.search(str(msg.get("Subject", "")))) or bool(CONFIRM_WORDS.search(text[:3000]))
+
+
+def body_text(msg: Message) -> str:
+    """Plain text and HTML parts together (links are looked for in both)."""
+    parts = []
+    for part in msg.walk() if msg.is_multipart() else [msg]:
+        if part.get_content_type() in ("text/plain", "text/html"):
+            try:
+                payload = part.get_payload(decode=True) or b""
+                parts.append(payload.decode(part.get_content_charset() or "utf-8", errors="replace"))
+            except Exception:
+                continue
+    return unescape("\n".join(parts))
+
+
+def confirm_link(text: str, domains: list[str]) -> str | None:
+    """The 'confirm my subscription' link: on the newsletter's own domain or its mailing service, never an
+    unsubscribe link."""
+    for url in URL_RE.findall(text):
+        url = url.rstrip(".,;")
+        low = url.lower()
+        if "unsub" in low or "optout" in low or "opt-out" in low:
+            continue
+        host = urlparse(url).hostname or ""
+        if not (domain_matches(host, domains) or domain_matches(host, list(ESP_DOMAINS))):
+            continue
+        if CONFIRM_WORDS.search(low) or "subscribe" in low or "subscription" in low:
+            return url
+    return None
+
+
+def is_public_url(url: str) -> bool:
+    """Only public internet addresses are opened (never the server's own network)."""
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        return False
+    try:
+        infos = socket.getaddrinfo(parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80))
+    except OSError:
+        return False
+    return all(ipaddress.ip_address(info[4][0]).is_global for info in infos)
+
+
+def open_link(url: str) -> bool:
+    if not is_public_url(url):
+        return False
+    try:
+        r = httpx.get(url, follow_redirects=True, timeout=15, headers={"User-Agent": "Mozilla/5.0 (compatible; mail client)"})
+        return r.status_code < 400
+    except httpx.HTTPError as e:
+        logger.warning("Couldn't open a newsletter confirm link: %s", e)
+        return False
+
+
+# ---------- Subscriptions (API) ----------
+
+def catalog() -> list[dict]:
+    return CATALOG
+
+
+def list_subscriptions(user_id: str) -> list[dict]:
+    return (_db().table("newsletter_subscriptions").select("*").eq("user_id", user_id).order("subscribed_at").execute().data)
+
+
+def add_subscription(user_id: str, mailbox_id: str, data: dict) -> dict:
+    name = (data.get("name") or "").strip()
+    domains = clean_domains(data.get("sender_domains") or "")
+    if not name:
+        raise ValueError("Give the newsletter a name.")
+    if not domains:
+        raise ValueError("Add the domain its emails come from, for example morningbrew.com.")
+    db = _db()
+    if db.table("newsletter_subscriptions").select("id").eq("mailbox_id", mailbox_id).eq("name", name).limit(1).execute().data:
+        raise ValueError(f"This mailbox is already subscribed to {name}.")
+    return db.table("newsletter_subscriptions").insert({
+        "user_id": user_id, "mailbox_id": mailbox_id, "name": name[:120],
+        "signup_url": (data.get("signup_url") or "").strip()[:500] or None, "sender_domains": ",".join(domains),
+    }).execute().data[0]
+
+
+def remove_subscription(user_id: str, sub_id: str) -> bool:
+    return bool(_db().table("newsletter_subscriptions").delete().eq("id", sub_id).eq("user_id", user_id).execute().data)
+
+
+# ---------- Inbox check ----------
+
+def process(imap, mb: dict, junk: str | None, now: datetime, move_to_inbox, quote) -> dict:
+    """Handles the newsletters that reached `mb`: rescues from spam, marks read, confirms pending subscriptions.
+    `move_to_inbox(imap, uid)` and `quote(folder)` come from mailbox_warmup."""
+    db = _db()
+    subs = db.table("newsletter_subscriptions").select("*").eq("mailbox_id", mb["id"]).execute().data
+    result = {"received": 0, "rescued": 0, "confirmed": 0}
+    if not subs:
+        return result
+    since = (now - timedelta(days=LOOKBACK_DAYS)).strftime("%d-%b-%Y")
+    for folder, landed in (("INBOX", "inbox"), (junk, "spam")):
+        if not folder or imap.select(quote(folder))[0] != "OK":
+            continue
+        for sub in subs:
+            domains = clean_domains(sub["sender_domains"])
+            # Inbox: only mail not read yet (read mail was handled before, or by a person). Spam: all of it.
+            criteria = ["SINCE", since] + (["UNSEEN"] if landed == "inbox" else [])
+            uids: list[bytes] = []
+            for d in domains:
+                _, data = imap.uid("search", None, *criteria, "FROM", f'"{d}"')
+                uids += [u for u in ((data[0] or b"").split() if data else []) if u not in uids]
+            changes: dict = {}
+            for uid in uids[:MAX_PER_CHECK]:
+                _, parts = imap.uid("fetch", uid, "(BODY.PEEK[])")
+                raw = next((p[1] for p in parts or [] if isinstance(p, tuple)), None)
+                if not raw:
+                    continue
+                msg = email.message_from_bytes(raw)
+                if not domain_matches(sender_domain(msg), domains):
+                    continue  # FROM search is a substring match; check the real sender domain
+                text = body_text(msg)
+                if sub["status"] == "pending" and is_confirmation(msg, text):
+                    link = confirm_link(text, domains)
+                    if link and open_link(link):
+                        changes.update(status="confirmed", confirmed_at=now.isoformat())
+                        sub["status"] = "confirmed"
+                        result["confirmed"] += 1
+                elif sub["status"] == "pending":
+                    # A regular issue arrived: the subscription is running (some newsletters need no confirmation)
+                    changes.update(status="confirmed", confirmed_at=now.isoformat())
+                    sub["status"] = "confirmed"
+                imap.uid("store", uid, "+FLAGS", "(\\Seen)")
+                if landed == "spam" and move_to_inbox(imap, uid):
+                    changes["rescued_count"] = sub.get("rescued_count", 0) + 1
+                    sub["rescued_count"] = changes["rescued_count"]
+                    result["rescued"] += 1
+                changes["received_count"] = sub.get("received_count", 0) + 1
+                sub["received_count"] = changes["received_count"]
+                changes["last_received_at"] = now.isoformat()
+                result["received"] += 1
+            if changes:
+                db.table("newsletter_subscriptions").update(changes).eq("id", sub["id"]).execute()
+    return result

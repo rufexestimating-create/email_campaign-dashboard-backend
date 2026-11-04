@@ -1,8 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 
 from app.api.deps import get_current_user
-from app.schemas.mailbox import MailboxCreate, MailboxUpdate
-from app.services import mailbox_warmup
+from app.schemas.mailbox import MailboxCreate, MailboxUpdate, NewsletterAdd
+from app.services import mailbox_warmup, newsletters
 from app.services.mailbox_warmup import MailboxError
 
 router = APIRouter(dependencies=[Depends(get_current_user)])
@@ -15,6 +15,28 @@ def _bad(e: Exception) -> HTTPException:
 @router.get("", summary="Warm-up mailboxes with today's progress and where their emails landed")
 def overview(user: dict = Depends(get_current_user)):
     return mailbox_warmup.overview(user["id"])
+
+
+@router.get("/newsletters", summary="Newsletters to subscribe the mailboxes to, and the subscriptions so far")
+def newsletter_list(user: dict = Depends(get_current_user)):
+    return {"catalog": newsletters.catalog(), "subscriptions": newsletters.list_subscriptions(user["id"])}
+
+
+@router.post("/{mailbox_id}/newsletters", status_code=status.HTTP_201_CREATED, summary="Record that a mailbox was subscribed to a newsletter")
+def newsletter_add(mailbox_id: str, data: NewsletterAdd, user: dict = Depends(get_current_user)):
+    if not mailbox_warmup.get_mailbox(user["id"], mailbox_id):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Mailbox not found.")
+    try:
+        return newsletters.add_subscription(user["id"], mailbox_id, data.model_dump())
+    except ValueError as e:
+        raise _bad(e)
+
+
+@router.delete("/newsletters/{sub_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Stop handling a newsletter for a mailbox")
+def newsletter_remove(sub_id: str, user: dict = Depends(get_current_user)):
+    if not newsletters.remove_subscription(user["id"], sub_id):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Subscription not found.")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.post("", status_code=status.HTTP_201_CREATED, summary="Add a mailbox (its login is checked first)")

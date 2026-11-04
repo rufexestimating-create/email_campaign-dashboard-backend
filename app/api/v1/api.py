@@ -1,5 +1,5 @@
 from fastapi import APIRouter
-from app.api.v1.endpoints import health, emails, dashboard, auth, campaigns, templates, spam, tracking, insights, mailboxes
+from app.api.v1.endpoints import health, emails, dashboard, auth, campaigns, templates, spam, tracking, insights, mailboxes, chat
 
 api_router = APIRouter()
 
@@ -16,3 +16,4 @@ api_router.include_router(tracking.webhook_router, prefix="/webhooks", tags=["Ev
 api_router.include_router(tracking.router, tags=["Event tracking"])
 api_router.include_router(insights.router, prefix="/insights", tags=["Send-time insights"])
 api_router.include_router(mailboxes.router, prefix="/mailboxes", tags=["Mailbox warm-up"])
+api_router.include_router(chat.router, prefix="/chat", tags=["Mailbox chat"])

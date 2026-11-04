@@ -21,3 +21,9 @@ class MailboxUpdate(BaseModel):
     daily_limit: Optional[int] = Field(None, ge=2, le=50)
     status: Optional[Literal["active", "paused"]] = None
     password: Optional[str] = Field(None, min_length=1, max_length=200)
+
+
+class NewsletterAdd(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    sender_domains: str = Field(min_length=3, max_length=300)
+    signup_url: Optional[str] = Field(None, max_length=500)

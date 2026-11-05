@@ -5,11 +5,17 @@ from pydantic import BaseModel, EmailStr, Field
 MAX_RECIPIENTS = 5000
 
 
+MAX_OWN_BODY = 20_000
+
+
 class RecipientIn(BaseModel):
     email: str = Field(..., max_length=320)
     name: Optional[str] = Field(None, max_length=200)
     # Extra CSV columns, usable in subject/body as {{column_name}}
     variables: Dict[str, str] = {}
+    # This person's own email, written for them in the composer; replaces the campaign's subject / message for them
+    subject: Optional[str] = Field(None, max_length=255)
+    body: Optional[str] = Field(None, max_length=MAX_OWN_BODY)
 
 
 class ABTestIn(BaseModel):

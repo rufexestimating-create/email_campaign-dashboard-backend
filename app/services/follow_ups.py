@@ -211,7 +211,7 @@ def run_due(now: datetime | None = None) -> dict:
             step = steps[row["follow_up_id"]]
             person = {**people.get(row["recipient"], {"email": row["recipient"], "name": None, "variables": {}}), "variant": f"F{row['step']}"}
             message_campaign = {**c, "subject_a": step["subject"], "body_a": step["body"], "ab_enabled": False}
-            message = campaign_service._build_message(message_campaign, {**person, "variant": "A"})
+            message = campaign_service._build_message(message_campaign, {**person, "variant": "A"}, own_content=False)
             (result,) = campaign_service._send_chunk([message])
             log = campaign_service._log_rows(c, [person], [message], [result])[0]
             db.table("email_logs").insert(log).execute()

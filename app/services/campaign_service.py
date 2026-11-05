@@ -30,6 +30,9 @@ FINAL_EVENTS = ("clicked", "replied", "bounced", "complained")
 
 PLACEHOLDER_RE = re.compile(r"{{\s*([a-zA-Z0-9_]+)\s*}}")
 NAME_COLUMNS = {"name", "full_name", "first_name", "firstname", "last_name", "lastname"}
+# A recipient's own subject / message (written for them in the composer). Kept in their variables under keys a CSV
+# column can never produce (column names lose leading underscores), so a spreadsheet can't overwrite them.
+OWN_SUBJECT, OWN_BODY = "_subject", "_body"
 
 
 def now_utc() -> datetime:
@@ -116,6 +119,10 @@ class CampaignService:
                 continue
             seen.add(email)
             variables = {k: str(v)[:500] for k, v in ((_normalize_key(k), v) for k, v in r.variables.items()) if k}
+            if (r.subject or "").strip():
+                variables[OWN_SUBJECT] = r.subject.strip()
+            if (r.body or "").strip():
+                variables[OWN_BODY] = r.body
             cleaned.append({"email": email, "name": (r.name or "").strip() or None, "variables": variables})
         if not cleaned:
             raise _bad_request("No valid recipient email addresses. Please check the list.")
@@ -154,7 +161,8 @@ class CampaignService:
         # Seed inboxes (the team's own test addresses) ride along on every campaign, so placement can be checked
         known = {r["email"] for r in recipients}
         # A seed borrows the first person's CSV columns, so {{subject}}/{{message}} templates don't reach it empty
-        sample = {k: v for k, v in (recipients[0]["variables"] if recipients else {}).items() if k not in NAME_COLUMNS}
+        # (not someone's own subject / message: a seed gets the campaign's email)
+        sample = {k: v for k, v in (recipients[0]["variables"] if recipients else {}).items() if k not in NAME_COLUMNS and not k.startswith("_")}
         recipients += [{**s, "variables": {**sample, **s["variables"]}} for s in warmup.seed_recipients(user_id) if s["email"] not in known]
         self._assign_variants(recipients, ab.enabled, ab.split)
 
@@ -373,10 +381,14 @@ class CampaignService:
                 return rows
             start += PAGE_SIZE
 
-    def _build_message(self, c: dict, r: dict) -> dict:
+    def _build_message(self, c: dict, r: dict, own_content: bool = True) -> dict:
+        """One recipient's email. With own_content, a subject / message written just for them replaces the campaign's
+        (follow-ups pass False: they send their own step's text)."""
         is_b = r["variant"] == "B" and c["ab_enabled"]
-        subject = tidy_subject(render(c["subject_b"] if is_b else c["subject_a"], personal_values(r), html=False))
-        body_template = c["body_b"] if is_b else c["body_a"]
+        own = (r.get("variables") or {}) if own_content else {}
+        subject_template = own.get(OWN_SUBJECT) or (c["subject_b"] if is_b else c["subject_a"])
+        subject = tidy_subject(render(subject_template, personal_values(r), html=False))
+        body_template = own.get(OWN_BODY) or (c["body_b"] if is_b else c["body_a"])
         is_html = c["content_type"] == "html"
         body = render(body_template, personal_values(r, greeting_fallback=True), html=is_html)
         msg = {

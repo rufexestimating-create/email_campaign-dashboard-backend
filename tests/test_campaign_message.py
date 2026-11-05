@@ -40,3 +40,40 @@ def test_unsubscribe_header_uses_reply_to_then_sender():
 def test_greeting_fallback_only_when_asked():
     assert personal_values({"email": "a@b.com"})["first_name"] == ""
     assert personal_values({"email": "a@b.com"}, greeting_fallback=True)["first_name"] == "there"
+
+
+# ---------- A person's own email, written for them in the composer ----------
+
+def test_a_person_can_get_their_own_subject_and_message():
+    own = {"_subject": "A note for you, {{first_name}}", "_body": "Hi {{first_name}},\n\nThis one is just for you."}
+    msg = campaign_service._build_message(CAMPAIGN, {"email": "sam@x.com", "name": "Sam Lee", "variables": own, "variant": "A"})
+    assert msg["subject"] == "A note for you, Sam" and msg["text"].startswith("Hi Sam,\n\nThis one is just for you.")
+    other = campaign_service._build_message(CAMPAIGN, {"email": "ann@x.com", "name": "Ann", "variables": {}, "variant": "A"})
+    assert other["subject"] == "Welcome aboard, Ann!"  # everyone else gets the campaign's email
+
+
+def test_an_own_html_message_is_not_escaped():
+    html = {**CAMPAIGN, "content_type": "html"}
+    msg = campaign_service._build_message(html, {"email": "sam@x.com", "name": "Sam", "variables": {"_body": "<p>Hi <b>{{first_name}}</b></p>"}, "variant": "A"})
+    assert "<b>Sam</b>" in msg["html"]
+
+
+def test_follow_ups_ignore_the_own_message():
+    r = {"email": "sam@x.com", "name": "Sam", "variables": {"_subject": "Own", "_body": "Own body"}, "variant": "A"}
+    step = {**CAMPAIGN, "subject_a": "Following up", "body_a": "Just checking in."}
+    msg = campaign_service._build_message(step, r, own_content=False)
+    assert msg["subject"] == "Following up" and msg["text"] == "Just checking in."
+
+
+def test_own_email_is_kept_whole_and_a_csv_cannot_fake_it():
+    from app.schemas.campaign import CampaignCreate
+
+    long_body = "word " * 400  # 2000 characters: CSV values are cut at 500, an own message isn't
+    data = CampaignCreate(
+        name="t", subject="Main", body="Main body", schedule={"type": "now"},
+        recipients=[{"email": "sam@x.com", "name": "Sam", "subject": "Mine", "body": long_body},
+                    {"email": "ann@x.com", "variables": {"_subject": "from a csv column"}}],
+    )
+    sam, ann = campaign_service._clean_recipients(data)
+    assert sam["variables"]["_subject"] == "Mine" and sam["variables"]["_body"] == long_body
+    assert "_subject" not in ann["variables"] and ann["variables"]["subject"] == "from a csv column"

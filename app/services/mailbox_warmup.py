@@ -99,8 +99,11 @@ def warmup_day(started_on: date, today: date) -> int:
     return max(1, (today - started_on).days + 1)
 
 
-def daily_target(day: int, limit: int) -> int:
-    """Emails a mailbox sends on its `day`th day of warm-up: 3 a day at first, rising to its daily limit."""
+def daily_target(day: int, limit: int, increase: int | None = None) -> int:
+    """Emails a mailbox sends on its `day`th day of warm-up. With an `increase` (Instantly-style): 1 on day 1, then that
+    many more each day up to its daily limit. Without: the standard ramp, 3 a day at first, rising to its daily limit."""
+    if increase:
+        return min(limit, 1 + (day - 1) * increase)
     for last_day, per_day in RAMP:
         if day <= last_day:
             return min(per_day, limit)
@@ -126,7 +129,7 @@ def plan_day(mailboxes: list[dict], already: dict[str, int], now: datetime, rng:
     for mb in mailboxes:
         if already.get(mb["id"]):
             continue
-        target = daily_target(warmup_day(_as_date(mb["warmup_started_on"]), today), mb["daily_limit"])
+        target = daily_target(warmup_day(_as_date(mb["warmup_started_on"]), today), mb["daily_limit"], mb.get("warmup_increase"))
         # The share of today still left, so a mailbox planned at 4 pm doesn't fit a whole day into two hours
         target = max(1, round(target * min(1.0, span / ((WINDOW[1] - WINDOW[0]) * 3600))))
         others = [m for m in mailboxes if m["id"] != mb["id"]]
@@ -197,7 +200,9 @@ def summarize(mailboxes: list[dict], messages: list[dict], today: date, tz: Zone
             "last_checked_at": mb.get("last_checked_at"),
             "daily_limit": mb["daily_limit"],
             "warmup_day": day,
-            "target_today": daily_target(day, mb["daily_limit"]),
+            "target_today": daily_target(day, mb["daily_limit"], mb.get("warmup_increase")),
+            "warmup_increase": mb.get("warmup_increase"),
+            "warmup_reply_rate": mb.get("warmup_reply_rate"),
             "sent_today": s["sent_today"],
             "scheduled_today": s["scheduled_today"],
             "received_today": s["received_today"],
@@ -214,6 +219,12 @@ def summarize(mailboxes: list[dict], messages: list[dict], today: date, tz: Zone
             "imap_host": mb.get("imap_host"),
         })
     return out
+
+
+def reply_rate(mb: dict) -> float:
+    """Share of the warm-up emails this mailbox receives that it answers: its own setting, else the standard."""
+    rate = mb.get("warmup_reply_rate")
+    return REPLY_RATE if rate is None else rate / 100
 
 
 def _health(status: str, inbox_rate: float | None, landed: int) -> str:
@@ -327,7 +338,7 @@ def _logout(imap):
 
 # ---------- Mailboxes (API) ----------
 
-PUBLIC_FIELDS = "id, user_id, email, display_name, smtp_host, smtp_port, imap_host, imap_port, username, status, warmup_started_on, daily_limit, last_error, last_checked_at, created_at"
+PUBLIC_FIELDS = "id, user_id, email, display_name, smtp_host, smtp_port, imap_host, imap_port, username, status, warmup_started_on, daily_limit, warmup_increase, warmup_reply_rate, last_error, last_checked_at, created_at"
 
 
 def list_mailboxes(user_id: str) -> list[dict]:
@@ -441,7 +452,7 @@ def update_mailbox(user_id: str, mailbox_id: str, data: dict) -> dict | None:
     mb = get_mailbox(user_id, mailbox_id, with_password=True)
     if not mb:
         return None
-    changes = {k: v for k, v in data.items() if k in ("display_name", "daily_limit") and v is not None}
+    changes = {k: v for k, v in data.items() if k in ("display_name", "daily_limit", "warmup_increase", "warmup_reply_rate") and v is not None}
     password = data.get("password")
     if password:
         test_connection(mb, password)
@@ -687,7 +698,7 @@ def check_inbox(mb: dict, mailboxes: list[dict], now: datetime, rng: random.Rand
                     "landed_in": landed, "found_at": now.isoformat(), "rescued": rescued,
                 }).eq("id", row["id"]).execute()
                 result[landed] += 1
-                if row["kind"] == "initial" and rng.random() < REPLY_RATE:
+                if row["kind"] == "initial" and rng.random() < reply_rate(mb):
                     result["replies"] += _schedule_reply(row, mb, mailboxes, now, rng)
             result["chat"] = result.get("chat", 0) + _handle_chat(imap, mb, found, landed, now)
         try:

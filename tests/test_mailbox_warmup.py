@@ -365,3 +365,13 @@ def test_domain_check_finds_records():
     assert out == {"domain": "arvistry.com", "spf": True, "dkim": True, "dkim_selector": "hostingermail-a", "dmarc": True, "dmarc_policy": "none"}
     none = mw.domain_check("ali@x.com", resolver=lambda n: [])
     assert not (none["spf"] or none["dkim"] or none["dmarc"])
+
+
+def test_instantly_style_ramp_and_reply_rate():
+    from app.services import mailbox_warmup as mw
+
+    assert [mw.daily_target(d, 10, 1) for d in (1, 2, 5, 10, 11, 30)] == [1, 2, 5, 10, 10, 10]
+    assert [mw.daily_target(d, 30, 3) for d in (1, 2, 3, 10, 11)] == [1, 4, 7, 28, 30]
+    assert mw.daily_target(4, 30) == 6  # no setting: the standard ramp
+    assert mw.reply_rate({}) == 0.5 and mw.reply_rate({"warmup_reply_rate": None}) == 0.5
+    assert mw.reply_rate({"warmup_reply_rate": 30}) == 0.3 and mw.reply_rate({"warmup_reply_rate": 0}) == 0

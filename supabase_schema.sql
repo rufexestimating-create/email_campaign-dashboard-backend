@@ -286,7 +286,7 @@ create table if not exists public.campaign_follow_ups (
   user_id     uuid not null references public.users(id) on delete cascade,
   campaign_id uuid not null references public.campaigns(id) on delete cascade,
   step        int  not null check (step between 1 and 2),
-  wait_days   int  not null check (wait_days between 1 and 30),
+  wait_days   int  not null check (wait_days between 0 and 30),  -- 0 = a test follow-up, about 10 minutes later
   subject     text not null,
   body        text not null,
   created_at  timestamptz not null default now(),
@@ -463,3 +463,7 @@ alter table public.email_logs          enable row level security;
 alter table public.email_templates     enable row level security;
 alter table public.campaigns           enable row level security;
 alter table public.campaign_recipients enable row level security;
+
+-- 5 November 2026: wait_days = 0 is a test follow-up (about 10 minutes after the first email)
+alter table public.campaign_follow_ups drop constraint if exists campaign_follow_ups_wait_days_check;
+alter table public.campaign_follow_ups add constraint campaign_follow_ups_wait_days_check check (wait_days between 0 and 30);

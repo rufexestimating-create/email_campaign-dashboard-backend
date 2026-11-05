@@ -1,5 +1,5 @@
 """Tests for automated follow-ups (M10) and the server-side pre-send block. Run from backend/: python -m pytest"""
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi.testclient import TestClient
@@ -115,7 +115,20 @@ def test_follow_ups_validate():
     try:
         too_many = {**CAMPAIGN, "save_as_draft": True, "follow_ups": [{"wait_days": 3, "subject": "s", "body": "b"}] * 3}
         assert r.post("/api/v1/campaigns", json=too_many).status_code == 422
-        bad_wait = {**CAMPAIGN, "save_as_draft": True, "follow_ups": [{"wait_days": 0, "subject": "s", "body": "b"}]}
-        assert r.post("/api/v1/campaigns", json=bad_wait).status_code == 422
+        for wait in (-1, 31):  # 0 is allowed: a test follow-up, about 10 minutes later
+            bad_wait = {**CAMPAIGN, "save_as_draft": True, "follow_ups": [{"wait_days": wait, "subject": "s", "body": "b"}]}
+            assert r.post("/api/v1/campaigns", json=bad_wait).status_code == 422
     finally:
         app.dependency_overrides.clear()
+
+
+def test_a_test_follow_up_goes_ten_minutes_later_whatever_the_window():
+    slow = ctx(delays={"per_lead": {"x@y.com": {"follow_up_after_hours": 48}}, "follow_up_after_hours": 72})
+    due = fu.due_time(WED_15_UTC, 0, "x@y.com", {"persona": "architect", "timezone": "America/New_York"}, slow)
+    assert due == WED_15_UTC + timedelta(minutes=fu.TEST_WAIT_MINUTES)
+
+
+def test_the_composer_accepts_a_test_follow_up():
+    from app.schemas.campaign import FollowUpIn
+
+    assert FollowUpIn(wait_days=0, subject="s", body="b").wait_days == 0

@@ -33,7 +33,8 @@ class ScheduleIn(BaseModel):
 
 
 class FollowUpIn(BaseModel):
-    wait_days: int = Field(..., ge=1, le=30)  # at least this long after the previous email (longer for slow repliers)
+    # At least this long after the previous email (longer for slow repliers). 0 = a quick test: about 10 minutes later.
+    wait_days: int = Field(..., ge=0, le=30)
     subject: str = Field(..., min_length=1, max_length=255)
     body: str = Field(..., min_length=1, max_length=100_000)
 

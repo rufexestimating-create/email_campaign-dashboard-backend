@@ -19,6 +19,8 @@ logger = logging.getLogger(__name__)
 
 MAX_STEPS = 2
 CLAIM_LIMIT = 100
+# wait_days = 0: a test follow-up, sent this many minutes after the previous email (no best-time window, no stretching)
+TEST_WAIT_MINUTES = 10
 STOP_STAGES = {"sql": "Moved to sales-qualified", "customer": "Became a customer", "lost": "Marked as lost"}
 STOP_REASONS = {
     "replied": "Replied",
@@ -54,6 +56,8 @@ def wait_hours(wait_days: int, slow_reply_hours: int | None) -> int:
 
 def due_time(anchor_utc: datetime, wait_days: int, recipient: str, lead: dict | None, ctx: dict) -> datetime:
     """When a follow-up should go out: after the wait, at the start of the contact's next best window (UTC)."""
+    if wait_days == 0:
+        return anchor_utc + timedelta(minutes=TEST_WAIT_MINUTES)
     delays = ctx["delays"]
     lead_delay = delays["per_lead"].get(recipient)
     slow = lead_delay["follow_up_after_hours"] if lead_delay else delays["follow_up_after_hours"]

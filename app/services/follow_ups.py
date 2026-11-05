@@ -273,19 +273,35 @@ def detail(user_id: str, campaign_id: str) -> dict:
     return {"steps": steps, "sends": rows, "skip_reasons": dict(reasons), "counts": summary_for([campaign_id]).get(campaign_id, {})}
 
 
+def _blocked(user_id: str, rows: list[dict], recipient: str) -> str | None:
+    """Why the waiting follow-ups would be skipped right now (replied, bounced, stage...), or None."""
+    for campaign_id in dict.fromkeys(r["campaign_id"] for r in rows):
+        state = recipient_states(user_id, campaign_id, [recipient.lower()]).get(recipient.lower(), {})
+        reason = stop_reason(state)
+        if reason:
+            return reason
+    return None
+
+
+def _pending_rows(user_id: str, recipient: str) -> list[dict]:
+    return _db().table("follow_up_sends").select("due_at, campaign_id").eq("user_id", user_id).eq("recipient", recipient)         .eq("status", "pending").order("due_at").execute().data
+
+
 def waiting_for(user_id: str, recipient: str) -> dict:
-    """This contact's follow-ups that haven't gone out yet, and when the next one is due."""
-    rows = _db().table("follow_up_sends").select("due_at").eq("user_id", user_id).eq("recipient", recipient) \
-        .eq("status", "pending").order("due_at").execute().data
-    return {"pending": len(rows), "next_due_at": rows[0]["due_at"] if rows else None}
+    """This contact's follow-ups that haven't gone out yet, when the next is due, and `blocked`: why they won't go out."""
+    rows = _pending_rows(user_id, recipient)
+    return {"pending": len(rows), "next_due_at": rows[0]["due_at"] if rows else None,
+            "blocked": _blocked(user_id, rows, recipient) if rows else None}
 
 
 def send_now_for(user_id: str, recipient: str) -> int:
     """Makes this contact's waiting follow-ups due now; the scheduler sends them within 30 seconds, with the usual
-    stop checks (replied, bounced, stage) still applied at send time."""
-    rows = _db().table("follow_up_sends").update({"due_at": datetime.now(timezone.utc).isoformat()}) \
-        .eq("user_id", user_id).eq("recipient", recipient).eq("status", "pending").execute().data
-    return len(rows)
+    stop checks still applied at send time. Returns 0 when they would only be skipped (e.g. the contact replied)."""
+    rows = _pending_rows(user_id, recipient)
+    if not rows or _blocked(user_id, rows, recipient):
+        return 0
+    done = _db().table("follow_up_sends").update({"due_at": datetime.now(timezone.utc).isoformat()})         .eq("user_id", user_id).eq("recipient", recipient).eq("status", "pending").execute().data
+    return len(done)
 
 
 def cancel(user_id: str, campaign_id: str) -> int:

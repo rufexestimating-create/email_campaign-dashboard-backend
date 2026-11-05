@@ -464,6 +464,8 @@ alter table public.email_templates     enable row level security;
 alter table public.campaigns           enable row level security;
 alter table public.campaign_recipients enable row level security;
 
--- 5 November 2026: wait_days = 0 is a test follow-up (about 10 minutes after the first email)
+-- 5 November 2026: short follow-up waits. wait_minutes (1 to 1440) is sent that many minutes after the previous email;
+-- wait_days = 0 without it means about 10 minutes.
 alter table public.campaign_follow_ups drop constraint if exists campaign_follow_ups_wait_days_check;
 alter table public.campaign_follow_ups add constraint campaign_follow_ups_wait_days_check check (wait_days between 0 and 30);
+alter table public.campaign_follow_ups add column if not exists wait_minutes int check (wait_minutes between 1 and 1440);

@@ -54,8 +54,11 @@ def wait_hours(wait_days: int, slow_reply_hours: int | None) -> int:
     return max(wait_days * 24, slow_reply_hours or 0)
 
 
-def due_time(anchor_utc: datetime, wait_days: int, recipient: str, lead: dict | None, ctx: dict) -> datetime:
-    """When a follow-up should go out: after the wait, at the start of the contact's next best window (UTC)."""
+def due_time(anchor_utc: datetime, wait_days: int, recipient: str, lead: dict | None, ctx: dict, wait_minutes: int | None = None) -> datetime:
+    """When a follow-up should go out: after the wait, at the start of the contact's next best window (UTC).
+    A wait in minutes (or wait_days 0) is sent right after it, with no window and no slow-reply stretch."""
+    if wait_minutes:
+        return anchor_utc + timedelta(minutes=wait_minutes)
     if wait_days == 0:
         return anchor_utc + timedelta(minutes=TEST_WAIT_MINUTES)
     delays = ctx["delays"]
@@ -97,7 +100,10 @@ def _default_tz(campaign: dict) -> str:
 
 def save_steps(user_id: str, campaign_id: str, steps: list[dict]):
     rows = [{"user_id": user_id, "campaign_id": campaign_id, "step": i + 1, "wait_days": s["wait_days"],
-             "subject": s["subject"], "body": s["body"]} for i, s in enumerate(steps[:MAX_STEPS])]
+             "subject": s["subject"], "body": s["body"],
+             # Only sent when used, so days-only follow-ups keep working on a database without the column yet
+             **({"wait_minutes": s["wait_minutes"]} if s.get("wait_minutes") else {})}
+            for i, s in enumerate(steps[:MAX_STEPS])]
     if rows:
         _db().table("campaign_follow_ups").insert(rows).execute()
 
@@ -116,7 +122,8 @@ def queue_step(campaign: dict, step: int, anchors: list[dict], ctx: dict | None 
     rows = [{
         "user_id": campaign["user_id"], "campaign_id": campaign["id"], "follow_up_id": follow_up["id"], "step": step,
         "recipient": a["recipient"], "anchor_email_id": a["email_id"],
-        "due_at": due_time(_utc(a["sent_at"]), follow_up["wait_days"], a["recipient"], ctx["leads"].get(a["recipient"]), ctx).isoformat(),
+        "due_at": due_time(_utc(a["sent_at"]), follow_up["wait_days"], a["recipient"], ctx["leads"].get(a["recipient"]), ctx,
+                           follow_up.get("wait_minutes")).isoformat(),
     } for a in anchors]
     for i in range(0, len(rows), 500):
         _db().table("follow_up_sends").upsert(rows[i:i + 500], on_conflict="follow_up_id,recipient", ignore_duplicates=True).execute()

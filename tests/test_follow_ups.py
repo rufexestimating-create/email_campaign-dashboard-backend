@@ -132,3 +132,28 @@ def test_the_composer_accepts_a_test_follow_up():
     from app.schemas.campaign import FollowUpIn
 
     assert FollowUpIn(wait_days=0, subject="s", body="b").wait_days == 0
+
+
+def test_a_wait_in_minutes_is_sent_right_after_it():
+    due = fu.due_time(WED_15_UTC, 0, "x@y.com", None, ctx(), wait_minutes=1)
+    assert due == WED_15_UTC + timedelta(minutes=1)
+    assert fu.due_time(WED_15_UTC, 0, "x@y.com", None, ctx(), wait_minutes=60) == WED_15_UTC + timedelta(hours=1)
+
+
+def test_days_only_follow_ups_do_not_send_the_minutes_column(monkeypatch):
+    inserted = []
+
+    class T:
+        def table(self, _):
+            return self
+
+        def insert(self, rows):
+            inserted.extend(rows)
+            return self
+
+        def execute(self):
+            return self
+
+    monkeypatch.setattr(fu, "_db", lambda: T())
+    fu.save_steps("u", "c", [{"wait_days": 3, "subject": "s", "body": "b"}, {"wait_days": 0, "wait_minutes": 1, "subject": "s", "body": "b"}])
+    assert "wait_minutes" not in inserted[0] and inserted[1]["wait_minutes"] == 1

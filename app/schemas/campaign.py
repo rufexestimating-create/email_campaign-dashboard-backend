@@ -35,6 +35,8 @@ class ScheduleIn(BaseModel):
 class FollowUpIn(BaseModel):
     # At least this long after the previous email (longer for slow repliers). 0 = a quick test: about 10 minutes later.
     wait_days: int = Field(..., ge=0, le=30)
+    # A short wait in minutes instead (1 minute, 10 minutes, 1 hour): sent then, without waiting for a best-time window
+    wait_minutes: Optional[int] = Field(None, ge=1, le=1440)
     subject: str = Field(..., min_length=1, max_length=255)
     body: str = Field(..., min_length=1, max_length=100_000)
 

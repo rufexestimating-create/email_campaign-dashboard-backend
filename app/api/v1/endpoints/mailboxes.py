@@ -89,6 +89,17 @@ def test(mailbox_id: str, user: dict = Depends(get_current_user)):
         raise _bad(e)
 
 
+@router.get("/{mailbox_id}/domain-check", summary="SPF, DKIM and DMARC records of the mailbox's domain")
+def domain_check(mailbox_id: str, user: dict = Depends(get_current_user)):
+    mb = mailbox_warmup.get_mailbox(user["id"], mailbox_id)
+    if not mb:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Mailbox not found")
+    try:
+        return mailbox_warmup.domain_check(mb["email"])
+    except Exception:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Couldn't look up the domain's DNS records right now. Try again in a minute.")
+
+
 @router.get("/{mailbox_id}/activity", summary="The mailbox's latest warm-up emails, sent and received")
 def activity(mailbox_id: str, user: dict = Depends(get_current_user)):
     if not mailbox_warmup.get_mailbox(user["id"], mailbox_id):

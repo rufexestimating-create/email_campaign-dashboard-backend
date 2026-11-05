@@ -51,6 +51,7 @@ MAX_MAILBOXES = 20
 TIMEOUT = 30
 # A server that can't be reached (timeout, network blip) is tried again later; only after this many failures in a row
 # is the mailbox set to 'error'. A wrong password stops it at once.
+READY_DAY = 14                  # earliest warm-up day a healthy mailbox is called ready for real campaigns
 FAILS_BEFORE_ERROR = 3
 RETRY_MINUTES = 10
 MAX_SEND_TRIES = 3              # an email that fails to send is tried this many times in all
@@ -207,6 +208,7 @@ def summarize(mailboxes: list[dict], messages: list[dict], today: date, tz: Zone
             "replies_7d": s["replies_7d"],
             "waiting": s["waiting"],
             "health": _health(mb["status"], inbox_rate, landed),
+            "ready": mb["status"] == "active" and day >= READY_DAY and _health(mb["status"], inbox_rate, landed) == "healthy",
             "series": [{"date": d, **v} for d, v in s["series"].items()],
             "smtp_host": mb.get("smtp_host"),
             "imap_host": mb.get("imap_host"),
@@ -370,6 +372,31 @@ def overview(user_id: str, now: datetime | None = None) -> dict:
         },
         "mailboxes": rows,
     }
+
+
+DKIM_SELECTORS = ["hostingermail1", "hostingermail-a", "hostingermail-b", "hostingermail-c", "default", "google", "selector1", "selector2", "resend"]
+
+
+def domain_check(email: str, resolver=None) -> dict:
+    """SPF, DMARC and DKIM records of a mailbox's domain. DKIM selectors differ by provider, so only common ones are tried:
+    not finding one is a hint, not proof it's missing."""
+    from app.services import preflight
+
+    domain = email.rsplit("@", 1)[-1].lower()
+    resolver = resolver or preflight.dns_txt
+    spf = [t for t in resolver(domain) if t.lower().startswith("v=spf1")]
+    dmarc = [t for t in resolver(f"_dmarc.{domain}") if t.lower().startswith("v=dmarc1")]
+    selector = None
+    for name in DKIM_SELECTORS:
+        try:
+            if any("p=" in t for t in resolver(f"{name}._domainkey.{domain}")):
+                selector = name
+                break
+        except Exception:
+            continue
+    m = re.search(r"(?:^|;)\s*p=(\w+)", dmarc[0], re.I) if dmarc else None
+    return {"domain": domain, "spf": bool(spf), "dkim": bool(selector), "dkim_selector": selector, "dmarc": bool(dmarc),
+            "dmarc_policy": m.group(1).lower() if m else None}
 
 
 def activity(user_id: str, mailbox_id: str, limit: int = 25) -> list[dict]:

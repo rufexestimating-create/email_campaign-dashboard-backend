@@ -351,3 +351,17 @@ def test_move_is_used_when_the_server_names_it_only_after_login():
     imap = LoggedInIMAP()
     assert mw._move_to_inbox(imap, b"9") is True
     assert imap.calls == [("move", b"9", "INBOX")]
+
+
+def test_domain_check_finds_records():
+    from app.services import mailbox_warmup as mw
+
+    records = {
+        "arvistry.com": ["v=spf1 include:_spf.mail.hostinger.com ~all"],
+        "_dmarc.arvistry.com": ["v=DMARC1; p=none"],
+        "hostingermail-a._domainkey.arvistry.com": ["v=DKIM1; k=rsa; p=ABC"],
+    }
+    out = mw.domain_check("ali@arvistry.com", resolver=lambda n: records.get(n, []))
+    assert out == {"domain": "arvistry.com", "spf": True, "dkim": True, "dkim_selector": "hostingermail-a", "dmarc": True, "dmarc_policy": "none"}
+    none = mw.domain_check("ali@x.com", resolver=lambda n: [])
+    assert not (none["spf"] or none["dkim"] or none["dmarc"])

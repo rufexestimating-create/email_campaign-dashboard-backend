@@ -65,7 +65,10 @@ ADVANCED_DEFAULTS = {
     "topic": warmup_content.DEFAULT_TOPIC,  # what the warm-up emails are about (warmup_content.TOPICS)
     "custom_subjects": [],    # the user's own subject lines, mixed in
     "custom_messages": [],    # the user's own messages, mixed in ({first_name} = the recipient)
+    "min_gap_minutes": 0,     # at least this long between two of its warm-up emails (0 = no minimum)
+    "reply_delay": "normal",  # how soon it answers a warm-up email: REPLY_DELAYS
 }
+REPLY_DELAYS = {"fast": (5, 30), "normal": REPLY_DELAY_MIN, "slow": (120, 360)}  # minutes after it arrives
 CONTENT_KEYS = ("topic", "custom_subjects", "custom_messages")
 HISTORY_DAYS = 30
 READY_DAY = 14                  # earliest warm-up day a healthy mailbox is called ready for real campaigns
@@ -157,6 +160,17 @@ def clock(mb: dict, default_tz: ZoneInfo) -> tuple[ZoneInfo, int, int]:
     return tz, start, end
 
 
+def send_offsets(rng: random.Random, count: int, span: float, gap_minutes: int = 0) -> list[float]:
+    """`count` random moments (seconds from the start) within `span` seconds. With a gap, any two are at least
+    `gap_minutes` apart; if they can't all fit, fewer are sent."""
+    if not gap_minutes:
+        return [rng.uniform(0, span) for _ in range(count)]
+    gap = gap_minutes * 60
+    count = min(count, int(span // gap) + 1)
+    free = span - gap * (count - 1)
+    return [x + i * gap for i, x in enumerate(sorted(rng.uniform(0, free) for _ in range(count)))]
+
+
 def window_hours(start: int, end: int) -> int:
     """Length of a sending window; one whose end is before its start runs past midnight (16 -> 3 is 11 hours)."""
     return end - start if start < end else 24 - start + end
@@ -216,8 +230,10 @@ def plan_day(mailboxes: list[dict], already: dict[str, int], now: datetime, rng:
         if adv["random_daily"] and target > 1:
             target = rng.randint(max(1, -(-target * 6 // 10)), target)
         others = [m for m in mailboxes if m["id"] != mb["id"]]
-        for _ in range(target):
-            at = start + timedelta(seconds=rng.uniform(0, span))
+        gap = adv.get("min_gap_minutes") or 0
+        offsets = send_offsets(rng, target, span, gap) if gap else None  # without a gap: as before, one by one
+        for i in range(len(offsets) if offsets is not None else target):
+            at = start + timedelta(seconds=offsets[i] if offsets is not None else rng.uniform(0, span))
             sends.append({"from": mb, "to": rng.choice(others), "at": at.astimezone(timezone.utc), "plan_date": today})
     return sorted(sends, key=lambda s: s["at"])
 
@@ -998,7 +1014,8 @@ def _schedule_reply(original: dict, me: dict, mailboxes: list[dict], now: dateti
         warmup_content.first_name(me.get("display_name"), me["email"]),
         warmup_content.first_name(partner.get("display_name"), partner["email"]))
     tz, w_start, w_end = clock(me, _tz())
-    at = office_hours(now + timedelta(minutes=rng.uniform(*REPLY_DELAY_MIN)), tz, rng, (w_start, w_end))
+    delay = REPLY_DELAYS.get(advanced(me).get("reply_delay"), REPLY_DELAY_MIN)
+    at = office_hours(now + timedelta(minutes=rng.uniform(*delay)), tz, rng, (w_start, w_end))
     _db().table("warmup_messages").insert({
         "user_id": me["user_id"], "from_mailbox_id": me["id"], "to_mailbox_id": partner["id"], "kind": "reply",
         "parent_id": original["id"], "plan_date": window_bounds(at, tz, w_start, w_end)[0].isoformat(),

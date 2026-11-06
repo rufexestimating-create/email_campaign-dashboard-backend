@@ -535,3 +535,22 @@ def test_rescues_warmup_email_moved_to_spam_later(monkeypatch):
     assert result.get("rescued_later") == 1 and row["rescued"] and row["landed_in"] == "inbox"
     assert ('"INBOX.Spam"', b"7", "INBOX") in imap.moved
     assert mw.check_inbox(boxes[1], boxes, NOW, random.Random(1)).get("rescued_later", 0) == 0
+
+
+def test_gap_between_emails_and_reply_delay():
+    import random
+    from datetime import datetime, timezone as tzu
+    from zoneinfo import ZoneInfo
+    from app.services import mailbox_warmup as mw
+
+    rng = random.Random(4)
+    offs = sorted(mw.send_offsets(rng, 5, 3 * 3600, 30))
+    assert len(offs) == 5 and all(b - a >= 30 * 60 - 1e-6 for a, b in zip(offs, offs[1:])) and offs[-1] <= 3 * 3600
+    assert len(mw.send_offsets(rng, 10, 3600, 30)) == 3  # only 3 fit in an hour with 30-minute gaps
+    pk = ZoneInfo("Asia/Karachi")
+    boxes = [{"id": "a", "warmup_started_on": "2026-11-01", "daily_limit": 8, "warmup_settings": {"slow_ramp": False, "min_gap_minutes": 40}},
+             {"id": "b", "warmup_started_on": "2026-11-01", "daily_limit": 8}]
+    sends = sorted((s["at"] for s in mw.plan_day(boxes, {}, datetime(2026, 11, 9, 3, 0, tzinfo=tzu.utc), random.Random(1), pk)
+                    if s["from"]["id"] == "a"))
+    assert len(sends) == 8 and all((b - a).total_seconds() >= 40 * 60 - 1 for a, b in zip(sends, sends[1:]))
+    assert mw.REPLY_DELAYS["fast"] == (5, 30) and mw.advanced({})["reply_delay"] == "normal"

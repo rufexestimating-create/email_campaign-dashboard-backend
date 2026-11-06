@@ -29,6 +29,8 @@ class WarmupAdvanced(BaseModel):
     topic: Optional[Literal["architecture", "general", "construction", "real_estate", "marketing", "software", "finance", "custom"]] = None
     custom_subjects: Optional[list[Annotated[str, Field(max_length=150)]]] = Field(None, max_length=50)
     custom_messages: Optional[list[Annotated[str, Field(max_length=2000)]]] = Field(None, max_length=30)
+    min_gap_minutes: Optional[int] = Field(None, ge=0, le=240)
+    reply_delay: Optional[Literal["fast", "normal", "slow"]] = None
 
 
 class ContentPreview(BaseModel):

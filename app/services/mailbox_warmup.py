@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 HEADER = "X-Warmup-Id"
 # (last day of the step, emails per day). After the last step a mailbox sends its own daily_limit.
 RAMP = [(3, 3), (7, 6), (14, 12), (21, 20)]
-WINDOW = (9, 18)                # office hours, local time (WARMUP_TIMEZONE)
+WINDOW = (settings.WARMUP_WINDOW_START, settings.WARMUP_WINDOW_END)  # sending hours, local time; may cross midnight
 REPLY_RATE = 0.5                # share of received warm-up emails that get answered
 REPLY_DELAY_MIN = (10, 120)     # minutes
 STAR_RATE = 0.2
@@ -152,9 +152,26 @@ def clock(mb: dict, default_tz: ZoneInfo) -> tuple[ZoneInfo, int, int]:
         except Exception:
             tz = default_tz
     start, end = adv.get("window_start"), adv.get("window_end")
-    if not (isinstance(start, int) and isinstance(end, int) and 0 <= start < end <= 24):
+    if not (isinstance(start, int) and isinstance(end, int) and 0 <= start <= 23 and 1 <= end <= 24 and start != end):
         start, end = WINDOW
     return tz, start, end
+
+
+def window_hours(start: int, end: int) -> int:
+    """Length of a sending window; one whose end is before its start runs past midnight (16 -> 3 is 11 hours)."""
+    return end - start if start < end else 24 - start + end
+
+
+def window_bounds(now: datetime, tz: ZoneInfo, start: int, end: int) -> tuple[date, datetime, datetime]:
+    """The sending window `now` belongs to: (its day, opens, closes). A window that crosses midnight belongs to the day
+    it opened, so at 1 AM inside a 4 PM - 3 AM window the day is yesterday."""
+    local = now.astimezone(tz)
+    day = local.date()
+    if start > end and local.hour < end:
+        day -= timedelta(days=1)
+    midnight = datetime.combine(day, datetime.min.time(), tz)
+    opens = midnight + timedelta(hours=start)
+    return day, opens, opens + timedelta(hours=window_hours(start, end))
 
 
 def daily_target(day: int, limit: int, increase: int | None = None, slow_ramp: bool = True) -> int:
@@ -185,11 +202,8 @@ def plan_day(mailboxes: list[dict], already: dict[str, int], now: datetime, rng:
         if already.get(mb["id"]):
             continue
         mtz, w_start, w_end = clock(mb, tz)
-        local = now.astimezone(mtz)
-        today = local.date()
-        midnight = datetime.combine(today, datetime.min.time(), mtz)
-        start = max(local + timedelta(minutes=2), midnight + timedelta(hours=w_start))
-        end = midnight + timedelta(hours=w_end)
+        today, opens, end = window_bounds(now, mtz, w_start, w_end)
+        start = max(now.astimezone(mtz) + timedelta(minutes=2), opens)
         if start >= end:
             continue
         span = (end - start).total_seconds()
@@ -198,7 +212,7 @@ def plan_day(mailboxes: list[dict], already: dict[str, int], now: datetime, rng:
         adv = advanced(mb)
         target = daily_target(warmup_day(_as_date(mb["warmup_started_on"]), today), mb["daily_limit"], mb.get("warmup_increase"), adv["slow_ramp"])
         # The share of today still left, so a mailbox planned at 4 pm doesn't fit a whole day into two hours
-        target = max(1, round(target * min(1.0, span / ((w_end - w_start) * 3600))))
+        target = max(1, round(target * min(1.0, span / (window_hours(w_start, w_end) * 3600))))
         if adv["random_daily"] and target > 1:
             target = rng.randint(max(1, -(-target * 6 // 10)), target)
         others = [m for m in mailboxes if m["id"] != mb["id"]]
@@ -604,8 +618,8 @@ def update_mailbox(user_id: str, mailbox_id: str, data: dict) -> dict | None:
             except Exception:
                 raise ValueError(f"Unknown timezone: {new['timezone']}")
         merged = {**advanced(mb), **new}
-        if not merged["window_start"] < merged["window_end"]:
-            raise ValueError("The sending window must start before it ends.")
+        if merged["window_start"] == merged["window_end"]:
+            raise ValueError("The sending window can't start and end at the same hour.")
         changes["warmup_settings"] = {**(mb.get("warmup_settings") or {}), **new}
     password = data.get("password")
     if password:
@@ -668,6 +682,11 @@ def _send_tries(error: str | None) -> int:
 def office_hours(at: datetime, tz: ZoneInfo, rng: random.Random, window: tuple[int, int] = WINDOW) -> datetime:
     """`at` if it falls in office hours; else early in the next office hours (a reply isn't sent at 9 pm)."""
     local = at.astimezone(tz)
+    if window[0] > window[1]:  # crosses midnight: open from the start hour until the end hour the next morning
+        if local.hour >= window[0] or local.hour < window[1]:
+            return at
+        opens = datetime.combine(local.date(), datetime.min.time(), tz) + timedelta(hours=window[0])
+        return (opens + timedelta(minutes=rng.uniform(0, 90))).astimezone(timezone.utc)
     opens = datetime.combine(local.date(), datetime.min.time(), tz) + timedelta(hours=window[0])
     if local.hour >= window[1]:
         opens += timedelta(days=1)
@@ -717,7 +736,7 @@ def plan(mailboxes: list[dict], now: datetime, rng: random.Random | None = None)
         dates = [(today + timedelta(days=d)).isoformat() for d in (-1, 0, 1)]
         planned = (db.table("warmup_messages").select("from_mailbox_id, plan_date").eq("user_id", user_id).eq("kind", "initial")
                    .in_("plan_date", dates).limit(5000).execute().data)
-        local_today = {mb["id"]: now.astimezone(clock(mb, tz)[0]).date().isoformat() for mb in mine}
+        local_today = {mb["id"]: window_bounds(now, *clock(mb, tz))[0].isoformat() for mb in mine}
         already: dict[str, int] = {}
         for r in planned:
             if str(r["plan_date"])[:10] == local_today.get(r["from_mailbox_id"]):
@@ -946,7 +965,7 @@ def _schedule_reply(original: dict, me: dict, mailboxes: list[dict], now: dateti
     at = office_hours(now + timedelta(minutes=rng.uniform(*REPLY_DELAY_MIN)), tz, rng, (w_start, w_end))
     _db().table("warmup_messages").insert({
         "user_id": me["user_id"], "from_mailbox_id": me["id"], "to_mailbox_id": partner["id"], "kind": "reply",
-        "parent_id": original["id"], "plan_date": at.astimezone(tz).date().isoformat(),
+        "parent_id": original["id"], "plan_date": window_bounds(at, tz, w_start, w_end)[0].isoformat(),
         "subject": subject, "body": body, "scheduled_at": at.isoformat(),
     }).execute()
     return 1

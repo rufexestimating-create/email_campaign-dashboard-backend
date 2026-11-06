@@ -437,7 +437,8 @@ def test_own_timezone_and_window():
     late = datetime(2026, 11, 9, 22, 0, tzinfo=tzu.utc)
     assert not [s for s in mw.plan_day([ny, pkb], {"pk": 5}, late, random.Random(3), pk) if s["from"]["id"] == "ny"]
     # an unknown timezone or a broken window falls back to the defaults
-    assert mw.clock({"warmup_settings": {"timezone": "Mars/Base", "window_start": 18, "window_end": 9}}, pk) == (pk, 9, 18)
+    assert mw.clock({"warmup_settings": {"timezone": "Mars/Base", "window_start": 9, "window_end": 9}}, pk) == (pk, 9, 18)
+    assert mw.clock({"warmup_settings": {"window_start": 18, "window_end": 9}}, pk) == (pk, 18, 9)  # overnight is valid
 
 
 def test_summary_counts_failures_and_last_activity():
@@ -479,3 +480,37 @@ def test_warmup_content_topics_and_own_lines():
     mixed = {"topic": "finance", "custom_subjects": ["Mine"]}
     subjects = {wc.compose_initial(random.Random(i), "Ali", "Sara", mixed)[0] for i in range(40)}
     assert "Mine" in subjects and subjects & set(wc.TOPICS["finance"]["subjects"])
+
+
+
+def test_window_across_midnight():
+    import random
+    from datetime import datetime, timezone as tzu
+    from zoneinfo import ZoneInfo
+    from app.services import mailbox_warmup as mw
+
+    pk = ZoneInfo("Asia/Karachi")
+    def box(i):
+        return {"id": f"m{i}", "warmup_started_on": "2026-11-01", "daily_limit": 10,
+                "warmup_settings": {"window_start": 16, "window_end": 3}}
+    boxes = [box(1), box(2)]
+    assert mw.window_hours(16, 3) == 11 and mw.window_hours(9, 18) == 9
+    # 20:00 Karachi: today's window (4 PM - 3 AM) is open, emails fall between now and 3 AM, dated today
+    evening = datetime(2026, 11, 9, 15, 0, tzinfo=tzu.utc)
+    sends = mw.plan_day(boxes, {}, evening, random.Random(2), pk)
+    assert sends
+    for s in sends:
+        local = s["at"].astimezone(pk)
+        assert local.hour >= 20 or local.hour < 3
+        assert s["plan_date"].isoformat() == "2026-11-09"
+    # 1 AM the next night still belongs to the 9 Nov window
+    assert mw.window_bounds(datetime(2026, 11, 9, 20, 0, tzinfo=tzu.utc), pk, 16, 3)[0].isoformat() == "2026-11-09"
+    # 10 AM: closed, opens at 4 PM
+    morning = datetime(2026, 11, 10, 5, 0, tzinfo=tzu.utc)
+    for s in mw.plan_day(boxes, {}, morning, random.Random(2), pk):
+        local = s["at"].astimezone(pk)
+        assert local.hour >= 16 or local.hour < 3
+    # a reply at 10 AM waits until the window opens at 4 PM
+    at = mw.office_hours(morning, pk, random.Random(1), (16, 3)).astimezone(pk)
+    assert at.hour in (16, 17) and at.date().isoformat() == "2026-11-10"
+    assert mw.office_hours(evening, pk, random.Random(1), (16, 3)) == evening

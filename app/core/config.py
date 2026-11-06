@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     # means the mailboxes have to be added again.
     MAILBOX_SECRET_KEY: str = ""
     WARMUP_TIMEZONE: str = "Asia/Karachi"
+    # Default warm-up sending window, local hours. An end before the start crosses midnight (16 and 3 = 4 PM - 3 AM)
+    WARMUP_WINDOW_START: int = 9
+    WARMUP_WINDOW_END: int = 18
 
     # Emails your Resend plan allows per day (free plan: 100). Used by the pre-send checks.
     DAILY_SEND_LIMIT: int = 100

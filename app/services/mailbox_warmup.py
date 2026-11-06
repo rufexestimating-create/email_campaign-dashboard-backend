@@ -551,6 +551,20 @@ def send_test(user_id: str, mailbox_id: str, now: datetime | None = None, rng: r
     return {"id": row["id"], "to": to["email"], "subject": subject}
 
 
+def send_planned_now(user_id: str, mailbox_id: str, message_id: str, now: datetime | None = None) -> dict:
+    """A planned warm-up email (or reply) of this mailbox goes out now instead of at its planned time."""
+    now = now or datetime.now(timezone.utc)
+    rows = (_db().table("warmup_messages").update({"scheduled_at": now.isoformat()})
+            .eq("id", message_id).eq("user_id", user_id).eq("status", "scheduled")
+            .or_(f"from_mailbox_id.eq.{mailbox_id},to_mailbox_id.eq.{mailbox_id}").execute().data)
+    if not rows:
+        raise ValueError("That email isn't waiting to be sent any more.")
+    sender = next((m for m in list_mailboxes(user_id) if m["id"] == rows[0]["from_mailbox_id"]), None)
+    if not sender or sender["status"] != "active":
+        raise ValueError("The mailbox that sends it has its warm-up off. Turn it on first.")
+    return {"id": rows[0]["id"], "subject": rows[0]["subject"]}
+
+
 def check_test(user_id: str, message_id: str, wait: float = TEST_CHECK_AFTER):
     """After a test email: wait for it to go out, then read the receiving inbox so it shows as landed (inbox / spam)."""
     time.sleep(wait)

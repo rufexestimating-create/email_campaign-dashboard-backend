@@ -122,6 +122,16 @@ def send_test(mailbox_id: str, background: BackgroundTasks, user: dict = Depends
     return out
 
 
+@router.post("/{mailbox_id}/activity/{message_id}/send-now", summary="Send a planned warm-up email or reply now")
+def send_planned_now(mailbox_id: str, message_id: str, background: BackgroundTasks, user: dict = Depends(get_current_user)):
+    try:
+        out = mailbox_warmup.send_planned_now(user["id"], mailbox_id, message_id)
+    except ValueError as e:
+        raise _bad(e)
+    background.add_task(mailbox_warmup.check_test, user["id"], out["id"])
+    return out
+
+
 @router.get("/{mailbox_id}/activity", summary="The mailbox's latest warm-up emails, sent and received")
 def activity(mailbox_id: str, user: dict = Depends(get_current_user)):
     if not mailbox_warmup.get_mailbox(user["id"], mailbox_id):

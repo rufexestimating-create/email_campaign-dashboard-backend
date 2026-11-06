@@ -514,3 +514,24 @@ def test_window_across_midnight():
     at = mw.office_hours(morning, pk, random.Random(1), (16, 3)).astimezone(pk)
     assert at.hour in (16, 17) and at.date().isoformat() == "2026-11-10"
     assert mw.office_hours(evening, pk, random.Random(1), (16, 3)) == evening
+
+
+
+def test_rescues_warmup_email_moved_to_spam_later(monkeypatch):
+    """An email recorded in the inbox and later put in spam (by the provider or a person) is moved back."""
+    from app.services import mailbox_warmup as mw
+    boxes = [mailbox(1), mailbox(2)]
+    for b in boxes:
+        b["password_enc"] = mw.encrypt("pw")
+    tables = {"mailboxes": [], "warmup_messages": [
+        {"id": "11111111-1111-1111-1111-111111111111", "from_mailbox_id": "mb1", "to_mailbox_id": "mb2", "kind": "initial",
+         "subject": "Thanks for today", "found_at": "2026-11-03T05:00:00+00:00", "landed_in": "inbox", "rescued": False},
+    ]}
+    imap = FakeIMAP(["00000000-0000-0000-0000-000000000000", "11111111-1111-1111-1111-111111111111"])  # spam uid 7
+    monkeypatch.setattr(mw, "_db", lambda: FakeDB(tables))
+    monkeypatch.setattr(mw, "_imap", lambda mb, pw: imap)
+    result = mw.check_inbox(boxes[1], boxes, NOW, random.Random(1))
+    row = tables["warmup_messages"][0]
+    assert result.get("rescued_later") == 1 and row["rescued"] and row["landed_in"] == "inbox"
+    assert ('"INBOX.Spam"', b"7", "INBOX") in imap.moved
+    assert mw.check_inbox(boxes[1], boxes, NOW, random.Random(1)).get("rescued_later", 0) == 0

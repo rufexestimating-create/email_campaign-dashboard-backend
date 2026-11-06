@@ -884,6 +884,8 @@ def check_inbox(mb: dict, mailboxes: list[dict], now: datetime, rng: random.Rand
                 result[landed] += 1
                 if row["kind"] == "initial" and rng.random() < reply_rate(mb):
                     result["replies"] += _schedule_reply(row, mb, mailboxes, now, rng)
+            if landed == "spam":
+                result["rescued_later"] = result.get("rescued_later", 0) + _rescue_found(imap, mb, found, rng)
             result["chat"] = result.get("chat", 0) + _handle_chat(imap, mb, found, landed, now)
         try:
             from app.services import newsletters
@@ -897,6 +899,26 @@ def check_inbox(mb: dict, mailboxes: list[dict], now: datetime, rng: random.Rand
     if result["inbox"] or result["spam"]:
         print(f"[warm-up] {mb['email']}: {result['inbox']} in inbox, {result['spam']} rescued from spam, {result['replies']} replies planned", flush=True)
     return result
+
+
+def _rescue_found(imap, mb: dict, found: dict[str, bytes], rng: random.Random) -> int:
+    """Warm-up emails in the spam folder that were already recorded (in the inbox, earlier) - put in spam later by the
+    provider or by a person - are moved back to the inbox too. Spam folder must be selected."""
+    if not found:
+        return 0
+    rows = (_db().table("warmup_messages").select("id, found_at").in_("id", list(found)).eq("to_mailbox_id", mb["id"])
+            .eq("rescued", False).execute().data)
+    share = advanced(mb)["spam_protection"] / 100
+    moved = 0
+    for row in rows:
+        if not row.get("found_at") or rng.random() >= share:
+            continue  # not seen before (handled above), or left in spam by the spam-protection setting
+        if _move_to_inbox(imap, found[row["id"]]):
+            claimed = _db().table("warmup_messages").update({"rescued": True}).eq("id", row["id"]).eq("rescued", False).execute().data
+            moved += 1 if claimed else 0
+    if moved:
+        print(f"[warm-up] {mb['email']}: {moved} earlier warm-up email(s) found in spam, moved back to the inbox", flush=True)
+    return moved
 
 
 def _handle_chat(imap, mb: dict, found: dict[str, bytes], landed: str, now: datetime) -> int:

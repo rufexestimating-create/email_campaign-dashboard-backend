@@ -314,8 +314,10 @@ def compose_initial(rng: random.Random, sender: str, recipient: str, content: di
     random from the topic's pools and the user's own lines, with a greeting and sign-off, so no two read the same.
     In own messages, {first_name} becomes the recipient's first name."""
     subjects, bodies, own_subjects, own_messages = _pools(content)
-    subject = _pick(rng, subjects, own_subjects)
-    if own_messages and (not bodies or rng.random() < OWN_SHARE):
+    # One choice per email: own lines go with own lines, so an own subject doesn't come with an unrelated topic message
+    use_own = bool(own_subjects or own_messages) and (not subjects or not bodies or rng.random() < OWN_SHARE)
+    subject = rng.choice(own_subjects if (use_own and own_subjects) or not subjects else subjects)
+    if own_messages and (use_own or not bodies):
         own = rng.choice(own_messages).replace("{first_name}", recipient).replace("{name}", recipient)
         parts = [own] if GREETING_RE.match(own) else [rng.choice(GREETINGS).format(name=recipient), own]
         return subject, "\n\n".join(parts) + f"\n\n{rng.choice(SIGNOFFS)}\n{sender}"

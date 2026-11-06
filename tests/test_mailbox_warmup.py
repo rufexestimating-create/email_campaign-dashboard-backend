@@ -393,3 +393,22 @@ def test_weekdays_only_skips_the_weekend():
     assert on_sat and all(s["from"]["id"] == "m2" for s in on_sat)
     on_mon = mw.plan_day(boxes, {}, monday, random.Random(1), tz)
     assert {s["from"]["id"] for s in on_mon} == {"m1", "m2"}
+
+
+def test_advanced_settings():
+    import random
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    from app.services import mailbox_warmup as mw
+
+    assert mw.advanced({})["open_rate"] == 100 and mw.advanced({"warmup_settings": {"open_rate": 70, "junk": 1}})["open_rate"] == 70
+    assert "junk" not in mw.advanced({"warmup_settings": {"junk": 1}})
+    assert mw.daily_target(1, 25, 1, slow_ramp=False) == 25
+    tz = ZoneInfo("Asia/Karachi")
+    box = {"id": "a", "warmup_started_on": "2026-11-01", "daily_limit": 20, "warmup_settings": {"slow_ramp": False, "random_daily": True}}
+    other = {"id": "b", "warmup_started_on": "2026-11-01", "daily_limit": 20}
+    counts = set()
+    for seed in range(20):
+        sends = mw.plan_day([box, other], {}, datetime(2026, 11, 9, 6, 0, tzinfo=tz), random.Random(seed), tz)
+        counts.add(sum(1 for s in sends if s["from"]["id"] == "a"))
+    assert len(counts) > 1 and min(counts) >= 12 and max(counts) <= 20

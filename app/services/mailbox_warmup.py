@@ -51,6 +51,15 @@ MAX_MAILBOXES = 20
 TIMEOUT = 30
 # A server that can't be reached (timeout, network blip) is tried again later; only after this many failures in a row
 # is the mailbox set to 'error'. A wrong password stops it at once.
+# Advanced settings (Instantly's names), per mailbox in mailboxes.warmup_settings; missing keys use these
+ADVANCED_DEFAULTS = {
+    "slow_ramp": True,        # off = the daily limit from day one (only for mailboxes that are already warm)
+    "random_daily": False,    # send a random number each day (60-100% of the day's target)
+    "open_rate": 100,         # % of received warm-up emails opened
+    "spam_protection": 100,   # % of warm-up emails found in spam that are moved to the inbox
+    "important_rate": 20,     # % of received warm-up emails flagged (starred / important)
+    "read_emulation": True,   # download the whole email before marking it read, like a mail app does
+}
 READY_DAY = 14                  # earliest warm-up day a healthy mailbox is called ready for real campaigns
 FAILS_BEFORE_ERROR = 3
 RETRY_MINUTES = 10
@@ -99,9 +108,17 @@ def warmup_day(started_on: date, today: date) -> int:
     return max(1, (today - started_on).days + 1)
 
 
-def daily_target(day: int, limit: int, increase: int | None = None) -> int:
+def advanced(mb: dict) -> dict:
+    """A mailbox's advanced warm-up settings, defaults filled in."""
+    return {**ADVANCED_DEFAULTS, **{k: v for k, v in (mb.get("warmup_settings") or {}).items() if k in ADVANCED_DEFAULTS}}
+
+
+def daily_target(day: int, limit: int, increase: int | None = None, slow_ramp: bool = True) -> int:
     """Emails a mailbox sends on its `day`th day of warm-up. With an `increase` (Instantly-style): 1 on day 1, then that
-    many more each day up to its daily limit. Without: the standard ramp, 3 a day at first, rising to its daily limit."""
+    many more each day up to its daily limit. Without: the standard ramp, 3 a day at first, rising to its daily limit.
+    `slow_ramp` off: the daily limit straight away."""
+    if not slow_ramp:
+        return limit
     if increase:
         return min(limit, 1 + (day - 1) * increase)
     for last_day, per_day in RAMP:
@@ -131,9 +148,12 @@ def plan_day(mailboxes: list[dict], already: dict[str, int], now: datetime, rng:
             continue
         if mb.get("warmup_weekdays_only") and today.weekday() >= 5:
             continue  # "Weekdays only": nothing on Saturday or Sunday
-        target = daily_target(warmup_day(_as_date(mb["warmup_started_on"]), today), mb["daily_limit"], mb.get("warmup_increase"))
+        adv = advanced(mb)
+        target = daily_target(warmup_day(_as_date(mb["warmup_started_on"]), today), mb["daily_limit"], mb.get("warmup_increase"), adv["slow_ramp"])
         # The share of today still left, so a mailbox planned at 4 pm doesn't fit a whole day into two hours
         target = max(1, round(target * min(1.0, span / ((WINDOW[1] - WINDOW[0]) * 3600))))
+        if adv["random_daily"] and target > 1:
+            target = rng.randint(max(1, -(-target * 6 // 10)), target)
         others = [m for m in mailboxes if m["id"] != mb["id"]]
         for _ in range(target):
             at = start + timedelta(seconds=rng.uniform(0, span))
@@ -204,7 +224,10 @@ def summarize(mailboxes: list[dict], messages: list[dict], today: date, tz: Zone
             "last_checked_at": mb.get("last_checked_at"),
             "daily_limit": mb["daily_limit"],
             "warmup_day": day,
-            "target_today": daily_target(day, mb["daily_limit"], mb.get("warmup_increase")),
+            "target_today": daily_target(day, mb["daily_limit"], mb.get("warmup_increase"), advanced(mb)["slow_ramp"]),
+            "warmup_started_on": str(mb["warmup_started_on"]),
+            "warmup_settings": advanced(mb),
+            "sent_7d": sum(v["sent"] for v in list(s["series"].values())[-7:]),
             "warmup_increase": mb.get("warmup_increase"),
             "warmup_reply_rate": mb.get("warmup_reply_rate"),
             "sent_today": s["sent_today"],
@@ -344,7 +367,7 @@ def _logout(imap):
 
 # ---------- Mailboxes (API) ----------
 
-PUBLIC_FIELDS = "id, user_id, email, display_name, smtp_host, smtp_port, imap_host, imap_port, username, status, warmup_started_on, daily_limit, warmup_increase, warmup_reply_rate, warmup_weekdays_only, last_error, last_checked_at, created_at"
+PUBLIC_FIELDS = "id, user_id, email, display_name, smtp_host, smtp_port, imap_host, imap_port, username, status, warmup_started_on, daily_limit, warmup_increase, warmup_reply_rate, warmup_weekdays_only, warmup_settings, last_error, last_checked_at, created_at"
 
 
 def list_mailboxes(user_id: str) -> list[dict]:
@@ -459,6 +482,9 @@ def update_mailbox(user_id: str, mailbox_id: str, data: dict) -> dict | None:
     if not mb:
         return None
     changes = {k: v for k, v in data.items() if k in ("display_name", "daily_limit", "warmup_increase", "warmup_reply_rate", "warmup_weekdays_only") and v is not None}
+    if data.get("warmup_settings"):
+        new = {k: v for k, v in data["warmup_settings"].items() if k in ADVANCED_DEFAULTS and v is not None}
+        changes["warmup_settings"] = {**(mb.get("warmup_settings") or {}), **new}
     password = data.get("password")
     if password:
         test_connection(mb, password)
@@ -692,13 +718,17 @@ def check_inbox(mb: dict, mailboxes: list[dict], now: datetime, rng: random.Rand
                 continue
             rows = (db.table("warmup_messages").select("id, from_mailbox_id, to_mailbox_id, kind, subject")
                     .in_("id", list(found)).eq("to_mailbox_id", mb["id"]).is_("found_at", "null").execute().data)
+            adv = advanced(mb)
             for row in rows:
                 uid = found[row["id"]]
-                imap.uid("store", uid, "+FLAGS", "(\\Seen)")
-                if rng.random() < STAR_RATE:
+                if rng.random() < adv["open_rate"] / 100:
+                    if adv["read_emulation"]:
+                        imap.uid("fetch", uid, "(BODY[])")  # reads the whole email, as a mail app does when it's opened
+                    imap.uid("store", uid, "+FLAGS", "(\\Seen)")
+                if rng.random() < adv["important_rate"] / 100:
                     imap.uid("store", uid, "+FLAGS", "(\\Flagged)")
                 rescued = False
-                if landed == "spam":
+                if landed == "spam" and rng.random() < adv["spam_protection"] / 100:
                     rescued = _move_to_inbox(imap, uid)
                 db.table("warmup_messages").update({
                     "landed_in": landed, "found_at": now.isoformat(), "rescued": rescued,

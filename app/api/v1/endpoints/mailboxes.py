@@ -126,7 +126,7 @@ def send_test(mailbox_id: str, background: BackgroundTasks, user: dict = Depends
 def activity(mailbox_id: str, user: dict = Depends(get_current_user)):
     if not mailbox_warmup.get_mailbox(user["id"], mailbox_id):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Mailbox not found.")
-    return mailbox_warmup.activity(user["id"], mailbox_id)
+    return mailbox_warmup.activity(user["id"], mailbox_id, limit=100)  # the dashboard pages through them
 
 
 @router.delete("/{mailbox_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Remove a mailbox and its warm-up history")

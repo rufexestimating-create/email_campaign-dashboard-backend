@@ -193,7 +193,7 @@ def summarize(mailboxes: list[dict], messages: list[dict], today: date, tz: Zone
     """Per mailbox: warm-up day, today's progress, and where its emails landed (last 7 days, plus a daily series)."""
     stats = {
         m["id"]: {
-            "sent_today": 0, "received_today": 0, "scheduled_today": 0,
+            "sent_today": 0, "initial_today": 0, "received_today": 0, "scheduled_today": 0,
             "inbox_7d": 0, "spam_7d": 0, "rescued_7d": 0, "received_7d": 0, "failed_7d": 0, "last_failure": None, "last_activity_at": None, "replies_7d": 0, "waiting": 0,
             "series": {(today - timedelta(days=i)).isoformat(): {"sent": 0, "inbox": 0, "spam": 0} for i in range(days - 1, -1, -1)},
         }
@@ -220,6 +220,8 @@ def summarize(mailboxes: list[dict], messages: list[dict], today: date, tz: Zone
             if msg["status"] == "sent":
                 if sent_day == today:
                     sender["sent_today"] += 1
+                    if msg["kind"] == "initial":
+                        sender["initial_today"] += 1  # what counts against the day's target; replies come on top
                 if sent_day and sent_day.isoformat() in sender["series"]:
                     sender["series"][sent_day.isoformat()]["sent"] += 1
                 if msg.get("landed_in") and sent_day and sent_day.isoformat() in sender["series"]:
@@ -263,6 +265,7 @@ def summarize(mailboxes: list[dict], messages: list[dict], today: date, tz: Zone
             "warmup_increase": mb.get("warmup_increase"),
             "warmup_reply_rate": mb.get("warmup_reply_rate"),
             "sent_today": s["sent_today"],
+            "initial_today": s["initial_today"],
             "scheduled_today": s["scheduled_today"],
             "received_today": s["received_today"],
             "inbox_7d": s["inbox_7d"],

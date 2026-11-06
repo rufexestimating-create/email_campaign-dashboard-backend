@@ -483,6 +483,50 @@ def domain_check(email: str, resolver=None) -> dict:
             "dmarc_policy": m.group(1).lower() if m else None}
 
 
+TEST_CHECK_AFTER = 45  # seconds after a test email is sent before the receiving inbox is read
+
+
+def send_test(user_id: str, mailbox_id: str, now: datetime | None = None, rng: random.Random | None = None) -> dict:
+    """A warm-up email from this mailbox to another of the user's, due now (any time of day): for trying the warm-up
+    without waiting for its window. The scheduler sends it within 30 s; check_test() reads the other inbox after."""
+    now = now or datetime.now(timezone.utc)
+    rng = rng or random.Random()
+    boxes = list_mailboxes(user_id)
+    me = next((m for m in boxes if m["id"] == mailbox_id), None)
+    if not me:
+        raise ValueError("Mailbox not found.")
+    if me["status"] != "active":
+        raise ValueError("Turn this mailbox's warm-up on first (the flame), then send a test.")
+    others = [m for m in boxes if m["id"] != mailbox_id and m["status"] == "active"]
+    if not others:
+        raise ValueError("Add or turn on a second mailbox: a test email goes to one of your other mailboxes.")
+    to = rng.choice(others)
+    subject, body = warmup_content.compose_initial(
+        rng, warmup_content.first_name(me.get("display_name"), me["email"]), warmup_content.first_name(to.get("display_name"), to["email"]))
+    row = _db().table("warmup_messages").insert({
+        "user_id": user_id, "from_mailbox_id": me["id"], "to_mailbox_id": to["id"], "kind": "initial",
+        "plan_date": now.astimezone(clock(me, _tz())[0]).date().isoformat(), "subject": subject, "body": body,
+        "scheduled_at": now.isoformat(),
+    }).execute().data[0]
+    return {"id": row["id"], "to": to["email"], "subject": subject}
+
+
+def check_test(user_id: str, message_id: str, wait: float = TEST_CHECK_AFTER):
+    """After a test email: wait for it to go out, then read the receiving inbox so it shows as landed (inbox / spam)."""
+    time.sleep(wait)
+    db = _db()
+    row = db.table("warmup_messages").select("to_mailbox_id, status").eq("id", message_id).limit(1).execute().data
+    if not row or row[0]["status"] != "sent":
+        time.sleep(wait)  # the scheduler may not have sent it yet
+    mailboxes = db.table("mailboxes").select(PUBLIC_FIELDS + ", password_enc").eq("user_id", user_id).eq("status", "active").execute().data
+    receiver = next((m for m in mailboxes if row and m["id"] == row[0]["to_mailbox_id"]), None)
+    if receiver:
+        try:
+            check_inbox(receiver, mailboxes, datetime.now(timezone.utc))
+        except Exception as e:  # the regular check a few minutes later picks it up anyway
+            logger.warning("Test check failed for %s: %s", receiver["email"], e)
+
+
 def activity(user_id: str, mailbox_id: str, limit: int = 25) -> list[dict]:
     db = _db()
     rows = (db.table("warmup_messages")
@@ -786,9 +830,12 @@ def check_inbox(mb: dict, mailboxes: list[dict], now: datetime, rng: random.Rand
                 rescued = False
                 if landed == "spam" and rng.random() < adv["spam_protection"] / 100:
                     rescued = _move_to_inbox(imap, uid)
-                db.table("warmup_messages").update({
+                # Only the first reader records it, so a test check and the regular check never both answer it
+                claimed = db.table("warmup_messages").update({
                     "landed_in": landed, "found_at": now.isoformat(), "rescued": rescued,
-                }).eq("id", row["id"]).execute()
+                }).eq("id", row["id"]).is_("found_at", "null").execute().data
+                if not claimed:
+                    continue
                 result[landed] += 1
                 if row["kind"] == "initial" and rng.random() < reply_rate(mb):
                     result["replies"] += _schedule_reply(row, mb, mailboxes, now, rng)

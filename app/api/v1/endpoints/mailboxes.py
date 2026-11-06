@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Response, status
 
 from app.api.deps import get_current_user
 from app.schemas.mailbox import MailboxCreate, MailboxUpdate, NewsletterAdd
@@ -98,6 +98,16 @@ def domain_check(mailbox_id: str, user: dict = Depends(get_current_user)):
         return mailbox_warmup.domain_check(mb["email"])
     except Exception:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Couldn't look up the domain's DNS records right now. Try again in a minute.")
+
+
+@router.post("/{mailbox_id}/send-test", summary="Send one warm-up email now (any time of day) and check where it lands")
+def send_test(mailbox_id: str, background: BackgroundTasks, user: dict = Depends(get_current_user)):
+    try:
+        out = mailbox_warmup.send_test(user["id"], mailbox_id)
+    except ValueError as e:
+        raise _bad(e)
+    background.add_task(mailbox_warmup.check_test, user["id"], out["id"])
+    return out
 
 
 @router.get("/{mailbox_id}/activity", summary="The mailbox's latest warm-up emails, sent and received")

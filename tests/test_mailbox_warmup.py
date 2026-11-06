@@ -412,3 +412,50 @@ def test_advanced_settings():
         sends = mw.plan_day([box, other], {}, datetime(2026, 11, 9, 6, 0, tzinfo=tz), random.Random(seed), tz)
         counts.add(sum(1 for s in sends if s["from"]["id"] == "a"))
     assert len(counts) > 1 and min(counts) >= 12 and max(counts) <= 20
+
+
+
+def test_own_timezone_and_window():
+    import random
+    from datetime import datetime, timezone as tzu
+    from zoneinfo import ZoneInfo
+    from app.services import mailbox_warmup as mw
+
+    pk = ZoneInfo("Asia/Karachi")
+    ny = {"id": "ny", "warmup_started_on": "2026-11-01", "daily_limit": 10,
+          "warmup_settings": {"timezone": "America/New_York", "window_start": 10, "window_end": 16}}
+    pkb = {"id": "pk", "warmup_started_on": "2026-11-01", "daily_limit": 10}
+    # 9 Nov 2026, 05:00 UTC = 10:00 Karachi = 00:00 New York: New York's emails are planned for 10-16 its time, its date
+    now = datetime(2026, 11, 9, 5, 0, tzinfo=tzu.utc)
+    sends = mw.plan_day([ny, pkb], {}, now, random.Random(3), pk)
+    ny_sends = [s for s in sends if s["from"]["id"] == "ny"]
+    assert ny_sends and any(s["from"]["id"] == "pk" for s in sends)
+    for s in ny_sends:
+        local = s["at"].astimezone(ZoneInfo("America/New_York"))
+        assert 10 <= local.hour < 16 and s["plan_date"].isoformat() == "2026-11-09"
+    # 22:00 UTC = 17:00 New York: its window is over, nothing more for it today
+    late = datetime(2026, 11, 9, 22, 0, tzinfo=tzu.utc)
+    assert not [s for s in mw.plan_day([ny, pkb], {"pk": 5}, late, random.Random(3), pk) if s["from"]["id"] == "ny"]
+    # an unknown timezone or a broken window falls back to the defaults
+    assert mw.clock({"warmup_settings": {"timezone": "Mars/Base", "window_start": 18, "window_end": 9}}, pk) == (pk, 9, 18)
+
+
+def test_summary_counts_failures_and_last_activity():
+    from datetime import date
+    from zoneinfo import ZoneInfo
+    from app.services import mailbox_warmup as mw
+
+    tz = ZoneInfo("Asia/Karachi")
+    boxes = [{"id": "a", "email": "a@x.com", "status": "active", "warmup_started_on": "2026-11-01", "daily_limit": 10},
+             {"id": "b", "email": "b@x.com", "status": "active", "warmup_started_on": "2026-11-01", "daily_limit": 10}]
+    msgs = [
+        {"from_mailbox_id": "a", "to_mailbox_id": "b", "kind": "initial", "plan_date": "2026-11-08", "status": "failed",
+         "scheduled_at": "2026-11-08T06:00:00+00:00", "sent_at": None, "found_at": None, "landed_in": None, "error": "[try 3] 550 rejected"},
+        {"from_mailbox_id": "a", "to_mailbox_id": "b", "kind": "initial", "plan_date": "2026-11-09", "status": "sent",
+         "scheduled_at": "2026-11-09T06:00:00+00:00", "sent_at": "2026-11-09T06:00:05+00:00", "found_at": "2026-11-09T06:04:00+00:00", "landed_in": "inbox"},
+    ]
+    rows = {r["id"]: r for r in mw.summarize(boxes, msgs, date(2026, 11, 9), tz, days=30)}
+    assert rows["a"]["failed_7d"] == 1 and "550" in rows["a"]["last_failure"]["error"]
+    assert rows["a"]["last_activity_at"].startswith("2026-11-09T06:00:05")
+    assert rows["b"]["last_activity_at"].startswith("2026-11-09T06:04")
+    assert len(rows["a"]["series"]) == 30

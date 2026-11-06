@@ -23,6 +23,9 @@ class WarmupAdvanced(BaseModel):
     spam_protection: Optional[int] = Field(None, ge=0, le=100)
     important_rate: Optional[int] = Field(None, ge=0, le=100)
     read_emulation: Optional[bool] = None
+    timezone: Optional[str] = Field(None, max_length=64)
+    window_start: Optional[int] = Field(None, ge=0, le=23)
+    window_end: Optional[int] = Field(None, ge=1, le=24)
 
 
 class MailboxUpdate(BaseModel):

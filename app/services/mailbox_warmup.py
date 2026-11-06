@@ -59,7 +59,11 @@ ADVANCED_DEFAULTS = {
     "spam_protection": 100,   # % of warm-up emails found in spam that are moved to the inbox
     "important_rate": 20,     # % of received warm-up emails flagged (starred / important)
     "read_emulation": True,   # download the whole email before marking it read, like a mail app does
+    "timezone": None,         # IANA name, e.g. "America/New_York"; None = WARMUP_TIMEZONE
+    "window_start": WINDOW[0],  # sending window, local hours: from ...
+    "window_end": WINDOW[1],    # ... until (exclusive)
 }
+HISTORY_DAYS = 30
 READY_DAY = 14                  # earliest warm-up day a healthy mailbox is called ready for real campaigns
 FAILS_BEFORE_ERROR = 3
 RETRY_MINUTES = 10
@@ -113,6 +117,21 @@ def advanced(mb: dict) -> dict:
     return {**ADVANCED_DEFAULTS, **{k: v for k, v in (mb.get("warmup_settings") or {}).items() if k in ADVANCED_DEFAULTS}}
 
 
+def clock(mb: dict, default_tz: ZoneInfo) -> tuple[ZoneInfo, int, int]:
+    """A mailbox's timezone and sending window (start, end hour), falling back to the defaults when unset or invalid."""
+    adv = advanced(mb)
+    tz = default_tz
+    if adv.get("timezone"):
+        try:
+            tz = ZoneInfo(adv["timezone"])
+        except Exception:
+            tz = default_tz
+    start, end = adv.get("window_start"), adv.get("window_end")
+    if not (isinstance(start, int) and isinstance(end, int) and 0 <= start < end <= 24):
+        start, end = WINDOW
+    return tz, start, end
+
+
 def daily_target(day: int, limit: int, increase: int | None = None, slow_ramp: bool = True) -> int:
     """Emails a mailbox sends on its `day`th day of warm-up. With an `increase` (Instantly-style): 1 on day 1, then that
     many more each day up to its daily limit. Without: the standard ramp, 3 a day at first, rising to its daily limit.
@@ -128,36 +147,39 @@ def daily_target(day: int, limit: int, increase: int | None = None, slow_ramp: b
 
 
 def plan_day(mailboxes: list[dict], already: dict[str, int], now: datetime, rng: random.Random, tz: ZoneInfo) -> list[dict]:
-    """Today's warm-up emails for mailboxes that have none planned yet: [{from, to, at}] (UTC times).
+    """Today's warm-up emails for mailboxes that have none planned yet: [{from, to, at, plan_date}] (UTC times).
 
-    `already` counts each mailbox's emails planned for today, so a mailbox added in the afternoon still gets its share
-    and one that's planned isn't planned twice. Times fall in what's left of today's office hours.
+    Each mailbox plans in its own timezone and sending window (clock()); `plan_date` is its local date. `already` counts
+    each mailbox's emails planned for its local today, so a mailbox added in the afternoon still gets its share and one
+    that's planned isn't planned twice. Times fall in what's left of today's window.
     """
     if len(mailboxes) < 2:
         return []
-    local = now.astimezone(tz)
-    today = local.date()
-    start = max(local + timedelta(minutes=2), datetime.combine(today, datetime.min.time(), tz).replace(hour=WINDOW[0]))
-    end = datetime.combine(today, datetime.min.time(), tz).replace(hour=WINDOW[1])
-    if start >= end:
-        return []
-    span = (end - start).total_seconds()
     sends = []
     for mb in mailboxes:
         if already.get(mb["id"]):
             continue
+        mtz, w_start, w_end = clock(mb, tz)
+        local = now.astimezone(mtz)
+        today = local.date()
+        midnight = datetime.combine(today, datetime.min.time(), mtz)
+        start = max(local + timedelta(minutes=2), midnight + timedelta(hours=w_start))
+        end = midnight + timedelta(hours=w_end)
+        if start >= end:
+            continue
+        span = (end - start).total_seconds()
         if mb.get("warmup_weekdays_only") and today.weekday() >= 5:
             continue  # "Weekdays only": nothing on Saturday or Sunday
         adv = advanced(mb)
         target = daily_target(warmup_day(_as_date(mb["warmup_started_on"]), today), mb["daily_limit"], mb.get("warmup_increase"), adv["slow_ramp"])
         # The share of today still left, so a mailbox planned at 4 pm doesn't fit a whole day into two hours
-        target = max(1, round(target * min(1.0, span / ((WINDOW[1] - WINDOW[0]) * 3600))))
+        target = max(1, round(target * min(1.0, span / ((w_end - w_start) * 3600))))
         if adv["random_daily"] and target > 1:
             target = rng.randint(max(1, -(-target * 6 // 10)), target)
         others = [m for m in mailboxes if m["id"] != mb["id"]]
         for _ in range(target):
             at = start + timedelta(seconds=rng.uniform(0, span))
-            sends.append({"from": mb, "to": rng.choice(others), "at": at.astimezone(timezone.utc)})
+            sends.append({"from": mb, "to": rng.choice(others), "at": at.astimezone(timezone.utc), "plan_date": today})
     return sorted(sends, key=lambda s: s["at"])
 
 
@@ -172,7 +194,7 @@ def summarize(mailboxes: list[dict], messages: list[dict], today: date, tz: Zone
     stats = {
         m["id"]: {
             "sent_today": 0, "received_today": 0, "scheduled_today": 0,
-            "inbox_7d": 0, "spam_7d": 0, "rescued_7d": 0, "received_7d": 0, "replies_7d": 0, "waiting": 0,
+            "inbox_7d": 0, "spam_7d": 0, "rescued_7d": 0, "received_7d": 0, "failed_7d": 0, "last_failure": None, "last_activity_at": None, "replies_7d": 0, "waiting": 0,
             "series": {(today - timedelta(days=i)).isoformat(): {"sent": 0, "inbox": 0, "spam": 0} for i in range(days - 1, -1, -1)},
         }
         for m in mailboxes
@@ -182,6 +204,16 @@ def summarize(mailboxes: list[dict], messages: list[dict], today: date, tz: Zone
         sender, receiver = stats.get(msg["from_mailbox_id"]), stats.get(msg["to_mailbox_id"])
         sent_day = _local_date(msg.get("sent_at"), tz)
         found_day = _local_date(msg.get("found_at"), tz)
+        if sender and msg["status"] == "failed":
+            failed_day = _local_date(msg.get("scheduled_at"), tz)
+            if failed_day and failed_day >= week_ago:
+                sender["failed_7d"] += 1
+                if msg.get("error") and (not sender["last_failure"] or msg["scheduled_at"] > sender["last_failure"]["at"]):
+                    sender["last_failure"] = {"at": msg["scheduled_at"], "error": msg["error"]}
+        if sender and msg.get("sent_at") and (not sender["last_activity_at"] or msg["sent_at"] > sender["last_activity_at"]):
+            sender["last_activity_at"] = msg["sent_at"]
+        if receiver and msg.get("found_at") and (not receiver["last_activity_at"] or msg["found_at"] > receiver["last_activity_at"]):
+            receiver["last_activity_at"] = msg["found_at"]
         if sender:
             if msg["status"] == "scheduled" and _as_date(msg["plan_date"]) == today:
                 sender["scheduled_today"] += 1
@@ -238,6 +270,9 @@ def summarize(mailboxes: list[dict], messages: list[dict], today: date, tz: Zone
             "inbox_rate_7d": inbox_rate,
             "rescued_7d": s["rescued_7d"],
             "received_7d": s["received_7d"],
+            "failed_7d": s["failed_7d"],
+            "last_failure": s["last_failure"],
+            "last_activity_at": s["last_activity_at"],
             "warmup_weekdays_only": bool(mb.get("warmup_weekdays_only")),
             "replies_7d": s["replies_7d"],
             "waiting": s["waiting"],
@@ -387,11 +422,11 @@ def overview(user_id: str, now: datetime | None = None) -> dict:
     mailboxes = list_mailboxes(user_id)
     messages = []
     if mailboxes:
-        since = (today - timedelta(days=14)).isoformat()
+        since = (today - timedelta(days=HISTORY_DAYS + 1)).isoformat()
         messages = (_db().table("warmup_messages")
-                    .select("from_mailbox_id, to_mailbox_id, kind, plan_date, status, sent_at, found_at, landed_in, rescued")
+                    .select("from_mailbox_id, to_mailbox_id, kind, plan_date, status, scheduled_at, sent_at, found_at, landed_in, rescued, error")
                     .eq("user_id", user_id).gte("plan_date", since).limit(10000).execute().data)
-    rows = summarize(mailboxes, messages, today, tz)
+    rows = summarize(mailboxes, messages, today, tz, days=HISTORY_DAYS)
     active = [r for r in rows if r["status"] == "active"]
     inbox = sum(r["inbox_7d"] for r in rows)
     spam = sum(r["spam_7d"] for r in rows)
@@ -404,6 +439,12 @@ def overview(user_id: str, now: datetime | None = None) -> dict:
         "summary": {
             "mailboxes": len(rows),
             "active": len(active),
+            "paused": sum(1 for r in rows if r["status"] == "paused"),
+            "failing": sum(1 for r in rows if r["status"] == "error"),
+            "failed_7d": sum(r["failed_7d"] for r in rows),
+            "spam_rate_7d": round(spam / (inbox + spam), 3) if inbox + spam else None,
+            "received_7d": sum(r["received_7d"] for r in rows),
+            "sent_7d": sum(r["sent_7d"] for r in rows),
             "sent_today": sum(r["sent_today"] for r in rows),
             "inbox_7d": inbox,
             "spam_7d": spam,
@@ -484,6 +525,14 @@ def update_mailbox(user_id: str, mailbox_id: str, data: dict) -> dict | None:
     changes = {k: v for k, v in data.items() if k in ("display_name", "daily_limit", "warmup_increase", "warmup_reply_rate", "warmup_weekdays_only") and v is not None}
     if data.get("warmup_settings"):
         new = {k: v for k, v in data["warmup_settings"].items() if k in ADVANCED_DEFAULTS and v is not None}
+        if new.get("timezone"):
+            try:
+                ZoneInfo(new["timezone"])
+            except Exception:
+                raise ValueError(f"Unknown timezone: {new['timezone']}")
+        merged = {**advanced(mb), **new}
+        if not merged["window_start"] < merged["window_end"]:
+            raise ValueError("The sending window must start before it ends.")
         changes["warmup_settings"] = {**(mb.get("warmup_settings") or {}), **new}
     password = data.get("password")
     if password:
@@ -543,11 +592,11 @@ def _send_tries(error: str | None) -> int:
     return int(m.group(1)) if m else 0
 
 
-def office_hours(at: datetime, tz: ZoneInfo, rng: random.Random) -> datetime:
+def office_hours(at: datetime, tz: ZoneInfo, rng: random.Random, window: tuple[int, int] = WINDOW) -> datetime:
     """`at` if it falls in office hours; else early in the next office hours (a reply isn't sent at 9 pm)."""
     local = at.astimezone(tz)
-    opens = datetime.combine(local.date(), datetime.min.time(), tz).replace(hour=WINDOW[0])
-    if local.hour >= WINDOW[1]:
+    opens = datetime.combine(local.date(), datetime.min.time(), tz) + timedelta(hours=window[0])
+    if local.hour >= window[1]:
         opens += timedelta(days=1)
     elif local >= opens:
         return at
@@ -591,11 +640,15 @@ def plan(mailboxes: list[dict], now: datetime, rng: random.Random | None = None)
     for user_id, mine in by_user.items():
         if len(mine) < 2:
             continue
-        planned = (db.table("warmup_messages").select("from_mailbox_id").eq("user_id", user_id).eq("kind", "initial")
-                   .eq("plan_date", today.isoformat()).limit(5000).execute().data)
+        # Mailboxes can be in other timezones, so their "today" is yesterday, today or tomorrow here
+        dates = [(today + timedelta(days=d)).isoformat() for d in (-1, 0, 1)]
+        planned = (db.table("warmup_messages").select("from_mailbox_id, plan_date").eq("user_id", user_id).eq("kind", "initial")
+                   .in_("plan_date", dates).limit(5000).execute().data)
+        local_today = {mb["id"]: now.astimezone(clock(mb, tz)[0]).date().isoformat() for mb in mine}
         already: dict[str, int] = {}
         for r in planned:
-            already[r["from_mailbox_id"]] = already.get(r["from_mailbox_id"], 0) + 1
+            if str(r["plan_date"])[:10] == local_today.get(r["from_mailbox_id"]):
+                already[r["from_mailbox_id"]] = already.get(r["from_mailbox_id"], 0) + 1
         rows = []
         for s in plan_day(mine, already, now, rng, tz):
             subject, body = warmup_content.compose_initial(
@@ -603,7 +656,7 @@ def plan(mailboxes: list[dict], now: datetime, rng: random.Random | None = None)
                 warmup_content.first_name(s["to"].get("display_name"), s["to"]["email"]))
             rows.append({
                 "user_id": user_id, "from_mailbox_id": s["from"]["id"], "to_mailbox_id": s["to"]["id"], "kind": "initial",
-                "plan_date": today.isoformat(), "subject": subject, "body": body, "scheduled_at": s["at"].isoformat(),
+                "plan_date": s["plan_date"].isoformat(), "subject": subject, "body": body, "scheduled_at": s["at"].isoformat(),
             })
         if rows:
             db.table("warmup_messages").insert(rows).execute()
@@ -813,8 +866,8 @@ def _schedule_reply(original: dict, me: dict, mailboxes: list[dict], now: dateti
         rng, original["subject"],
         warmup_content.first_name(me.get("display_name"), me["email"]),
         warmup_content.first_name(partner.get("display_name"), partner["email"]))
-    tz = _tz()
-    at = office_hours(now + timedelta(minutes=rng.uniform(*REPLY_DELAY_MIN)), tz, rng)
+    tz, w_start, w_end = clock(me, _tz())
+    at = office_hours(now + timedelta(minutes=rng.uniform(*REPLY_DELAY_MIN)), tz, rng, (w_start, w_end))
     _db().table("warmup_messages").insert({
         "user_id": me["user_id"], "from_mailbox_id": me["id"], "to_mailbox_id": partner["id"], "kind": "reply",
         "parent_id": original["id"], "plan_date": at.astimezone(tz).date().isoformat(),

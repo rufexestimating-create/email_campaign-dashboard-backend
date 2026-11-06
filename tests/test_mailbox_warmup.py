@@ -459,3 +459,23 @@ def test_summary_counts_failures_and_last_activity():
     assert rows["a"]["last_activity_at"].startswith("2026-11-09T06:00:05")
     assert rows["b"]["last_activity_at"].startswith("2026-11-09T06:04")
     assert len(rows["a"]["series"]) == 30
+
+
+
+def test_warmup_content_topics_and_own_lines():
+    import random
+    from app.services import warmup_content as wc
+
+    # no settings = the architecture pools, as before
+    s, b = wc.compose_initial(random.Random(1), "Ali", "Sara")
+    assert s in wc.TOPICS["architecture"]["subjects"]
+    for _ in range(20):
+        s, b = wc.compose_initial(random.Random(_), "Ali", "Sara", {"topic": "software"})
+        assert s in wc.TOPICS["software"]["subjects"] and b.startswith(tuple(g.format(name="Sara")[:3] for g in wc.GREETINGS))
+    own = {"topic": "custom", "custom_subjects": ["Own subject"], "custom_messages": ["Hello {first_name}, own text."]}
+    for i in range(10):
+        s, b = wc.compose_initial(random.Random(i), "Ali", "Sara", own)
+        assert s == "Own subject" and b.startswith("Hello Sara, own text.") and b.endswith("Ali")
+    mixed = {"topic": "finance", "custom_subjects": ["Mine"]}
+    subjects = {wc.compose_initial(random.Random(i), "Ali", "Sara", mixed)[0] for i in range(40)}
+    assert "Mine" in subjects and subjects & set(wc.TOPICS["finance"]["subjects"])

@@ -1,7 +1,8 @@
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Response, status
 
 from app.api.deps import get_current_user
-from app.schemas.mailbox import MailboxCreate, MailboxUpdate, NewsletterAdd
+from app.schemas.mailbox import ContentPreview, MailboxCreate, MailboxUpdate, NewsletterAdd
+from app.services import warmup_content
 from app.services import mailbox_warmup, newsletters
 from app.services.mailbox_warmup import MailboxError
 
@@ -57,6 +58,17 @@ def newsletter_remove(sub_id: str, user: dict = Depends(get_current_user)):
     if not newsletters.remove_subscription(user["id"], sub_id):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Subscription not found.")
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get("/content-topics", summary="Topics the warm-up emails can be about")
+def content_topics(user: dict = Depends(get_current_user)):
+    return warmup_content.topics()
+
+
+@router.post("/content-preview", summary="Sample warm-up emails for a topic and own subjects / messages (not saved)")
+def content_preview(data: ContentPreview, user: dict = Depends(get_current_user)):
+    content = {"topic": data.topic, "custom_subjects": data.custom_subjects, "custom_messages": data.custom_messages}
+    return mailbox_warmup.preview(user["id"], content, data.mailbox_id)
 
 
 @router.post("", status_code=status.HTTP_201_CREATED, summary="Add a mailbox (its login is checked first)")

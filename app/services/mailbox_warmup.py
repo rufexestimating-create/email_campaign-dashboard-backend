@@ -62,7 +62,11 @@ ADVANCED_DEFAULTS = {
     "timezone": None,         # IANA name, e.g. "America/New_York"; None = WARMUP_TIMEZONE
     "window_start": WINDOW[0],  # sending window, local hours: from ...
     "window_end": WINDOW[1],    # ... until (exclusive)
+    "topic": warmup_content.DEFAULT_TOPIC,  # what the warm-up emails are about (warmup_content.TOPICS)
+    "custom_subjects": [],    # the user's own subject lines, mixed in
+    "custom_messages": [],    # the user's own messages, mixed in ({first_name} = the recipient)
 }
+CONTENT_KEYS = ("topic", "custom_subjects", "custom_messages")
 HISTORY_DAYS = 30
 READY_DAY = 14                  # earliest warm-up day a healthy mailbox is called ready for real campaigns
 FAILS_BEFORE_ERROR = 3
@@ -115,6 +119,27 @@ def warmup_day(started_on: date, today: date) -> int:
 def advanced(mb: dict) -> dict:
     """A mailbox's advanced warm-up settings, defaults filled in."""
     return {**ADVANCED_DEFAULTS, **{k: v for k, v in (mb.get("warmup_settings") or {}).items() if k in ADVANCED_DEFAULTS}}
+
+
+def content_of(mb: dict) -> dict:
+    """What a mailbox's warm-up emails are about: {topic, custom_subjects, custom_messages}."""
+    adv = advanced(mb)
+    return {k: adv[k] for k in CONTENT_KEYS}
+
+
+def preview(user_id: str, content: dict, mailbox_id: str | None = None, count: int = 3) -> list[dict]:
+    """Sample warm-up emails for content settings that may not be saved yet, written as this mailbox to another."""
+    boxes = list_mailboxes(user_id)
+    me = next((m for m in boxes if m["id"] == mailbox_id), boxes[0] if boxes else None)
+    other = next((m for m in boxes if me and m["id"] != me["id"]), None)
+    sender = warmup_content.first_name(me.get("display_name"), me["email"]) if me else "Ali"
+    to = warmup_content.first_name(other.get("display_name"), other["email"]) if other else "Sara"
+    rng = random.Random()
+    out = []
+    for _ in range(count):
+        subject, body = warmup_content.compose_initial(rng, sender, to, content)
+        out.append({"subject": subject, "body": body, "from": me["email"] if me else None, "to": other["email"] if other else None})
+    return out
 
 
 def clock(mb: dict, default_tz: ZoneInfo) -> tuple[ZoneInfo, int, int]:
@@ -502,7 +527,8 @@ def send_test(user_id: str, mailbox_id: str, now: datetime | None = None, rng: r
         raise ValueError("Add or turn on a second mailbox: a test email goes to one of your other mailboxes.")
     to = rng.choice(others)
     subject, body = warmup_content.compose_initial(
-        rng, warmup_content.first_name(me.get("display_name"), me["email"]), warmup_content.first_name(to.get("display_name"), to["email"]))
+        rng, warmup_content.first_name(me.get("display_name"), me["email"]), warmup_content.first_name(to.get("display_name"), to["email"]),
+        content_of(me))
     row = _db().table("warmup_messages").insert({
         "user_id": user_id, "from_mailbox_id": me["id"], "to_mailbox_id": to["id"], "kind": "initial",
         "plan_date": now.astimezone(clock(me, _tz())[0]).date().isoformat(), "subject": subject, "body": body,
@@ -700,7 +726,7 @@ def plan(mailboxes: list[dict], now: datetime, rng: random.Random | None = None)
         for s in plan_day(mine, already, now, rng, tz):
             subject, body = warmup_content.compose_initial(
                 rng, warmup_content.first_name(s["from"].get("display_name"), s["from"]["email"]),
-                warmup_content.first_name(s["to"].get("display_name"), s["to"]["email"]))
+                warmup_content.first_name(s["to"].get("display_name"), s["to"]["email"]), content_of(s["from"]))
             rows.append({
                 "user_id": user_id, "from_mailbox_id": s["from"]["id"], "to_mailbox_id": s["to"]["id"], "kind": "initial",
                 "plan_date": s["plan_date"].isoformat(), "subject": subject, "body": body, "scheduled_at": s["at"].isoformat(),

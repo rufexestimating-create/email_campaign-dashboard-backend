@@ -1,4 +1,4 @@
-from typing import Literal, Optional
+from typing import Annotated, Literal, Optional
 
 from pydantic import BaseModel, EmailStr, Field
 
@@ -26,6 +26,16 @@ class WarmupAdvanced(BaseModel):
     timezone: Optional[str] = Field(None, max_length=64)
     window_start: Optional[int] = Field(None, ge=0, le=23)
     window_end: Optional[int] = Field(None, ge=1, le=24)
+    topic: Optional[Literal["architecture", "general", "construction", "real_estate", "marketing", "software", "finance", "custom"]] = None
+    custom_subjects: Optional[list[Annotated[str, Field(max_length=150)]]] = Field(None, max_length=50)
+    custom_messages: Optional[list[Annotated[str, Field(max_length=2000)]]] = Field(None, max_length=30)
+
+
+class ContentPreview(BaseModel):
+    mailbox_id: Optional[str] = None
+    topic: Optional[str] = Field(None, max_length=40)
+    custom_subjects: list[Annotated[str, Field(max_length=150)]] = Field(default_factory=list, max_length=50)
+    custom_messages: list[Annotated[str, Field(max_length=2000)]] = Field(default_factory=list, max_length=30)
 
 
 class MailboxUpdate(BaseModel):

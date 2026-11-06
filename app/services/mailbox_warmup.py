@@ -129,6 +129,8 @@ def plan_day(mailboxes: list[dict], already: dict[str, int], now: datetime, rng:
     for mb in mailboxes:
         if already.get(mb["id"]):
             continue
+        if mb.get("warmup_weekdays_only") and today.weekday() >= 5:
+            continue  # "Weekdays only": nothing on Saturday or Sunday
         target = daily_target(warmup_day(_as_date(mb["warmup_started_on"]), today), mb["daily_limit"], mb.get("warmup_increase"))
         # The share of today still left, so a mailbox planned at 4 pm doesn't fit a whole day into two hours
         target = max(1, round(target * min(1.0, span / ((WINDOW[1] - WINDOW[0]) * 3600))))
@@ -150,7 +152,7 @@ def summarize(mailboxes: list[dict], messages: list[dict], today: date, tz: Zone
     stats = {
         m["id"]: {
             "sent_today": 0, "received_today": 0, "scheduled_today": 0,
-            "inbox_7d": 0, "spam_7d": 0, "rescued_7d": 0, "replies_7d": 0, "waiting": 0,
+            "inbox_7d": 0, "spam_7d": 0, "rescued_7d": 0, "received_7d": 0, "replies_7d": 0, "waiting": 0,
             "series": {(today - timedelta(days=i)).isoformat(): {"sent": 0, "inbox": 0, "spam": 0} for i in range(days - 1, -1, -1)},
         }
         for m in mailboxes
@@ -182,6 +184,8 @@ def summarize(mailboxes: list[dict], messages: list[dict], today: date, tz: Zone
         if receiver and found_day:
             if found_day == today:
                 receiver["received_today"] += 1
+            if found_day >= week_ago:
+                receiver["received_7d"] += 1
             if msg.get("rescued") and found_day >= week_ago:
                 receiver["rescued_7d"] += 1
 
@@ -210,6 +214,8 @@ def summarize(mailboxes: list[dict], messages: list[dict], today: date, tz: Zone
             "spam_7d": s["spam_7d"],
             "inbox_rate_7d": inbox_rate,
             "rescued_7d": s["rescued_7d"],
+            "received_7d": s["received_7d"],
+            "warmup_weekdays_only": bool(mb.get("warmup_weekdays_only")),
             "replies_7d": s["replies_7d"],
             "waiting": s["waiting"],
             "health": _health(mb["status"], inbox_rate, landed),
@@ -338,7 +344,7 @@ def _logout(imap):
 
 # ---------- Mailboxes (API) ----------
 
-PUBLIC_FIELDS = "id, user_id, email, display_name, smtp_host, smtp_port, imap_host, imap_port, username, status, warmup_started_on, daily_limit, warmup_increase, warmup_reply_rate, last_error, last_checked_at, created_at"
+PUBLIC_FIELDS = "id, user_id, email, display_name, smtp_host, smtp_port, imap_host, imap_port, username, status, warmup_started_on, daily_limit, warmup_increase, warmup_reply_rate, warmup_weekdays_only, last_error, last_checked_at, created_at"
 
 
 def list_mailboxes(user_id: str) -> list[dict]:
@@ -452,7 +458,7 @@ def update_mailbox(user_id: str, mailbox_id: str, data: dict) -> dict | None:
     mb = get_mailbox(user_id, mailbox_id, with_password=True)
     if not mb:
         return None
-    changes = {k: v for k, v in data.items() if k in ("display_name", "daily_limit", "warmup_increase", "warmup_reply_rate") and v is not None}
+    changes = {k: v for k, v in data.items() if k in ("display_name", "daily_limit", "warmup_increase", "warmup_reply_rate", "warmup_weekdays_only") and v is not None}
     password = data.get("password")
     if password:
         test_connection(mb, password)

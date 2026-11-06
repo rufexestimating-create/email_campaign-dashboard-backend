@@ -375,3 +375,21 @@ def test_instantly_style_ramp_and_reply_rate():
     assert mw.daily_target(4, 30) == 6  # no setting: the standard ramp
     assert mw.reply_rate({}) == 0.5 and mw.reply_rate({"warmup_reply_rate": None}) == 0.5
     assert mw.reply_rate({"warmup_reply_rate": 30}) == 0.3 and mw.reply_rate({"warmup_reply_rate": 0}) == 0
+
+
+def test_weekdays_only_skips_the_weekend():
+    import random
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    from app.services import mailbox_warmup as mw
+
+    tz = ZoneInfo("Asia/Karachi")
+    def box(i, weekdays):
+        return {"id": f"m{i}", "warmup_started_on": "2026-11-01", "daily_limit": 10, "warmup_weekdays_only": weekdays}
+    boxes = [box(1, True), box(2, False)]
+    saturday = datetime(2026, 11, 7, 6, 0, tzinfo=tz)   # 7 Nov 2026 is a Saturday
+    monday = datetime(2026, 11, 9, 6, 0, tzinfo=tz)
+    on_sat = mw.plan_day(boxes, {}, saturday, random.Random(1), tz)
+    assert on_sat and all(s["from"]["id"] == "m2" for s in on_sat)
+    on_mon = mw.plan_day(boxes, {}, monday, random.Random(1), tz)
+    assert {s["from"]["id"] for s in on_mon} == {"m1", "m2"}

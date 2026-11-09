@@ -382,7 +382,12 @@ def feed(user_id: str, fresh: bool = False) -> list[dict]:
             logger.warning("Newsletter feed: reading %s failed: %s", mb["email"], e)
         finally:
             mw._logout(imap)
-    out.sort(key=lambda e: e["date"] or "", reverse=True)
+    def when(e: dict) -> float:  # dates come in each sender's own timezone: compare them as moments
+        try:
+            return datetime.fromisoformat(e["date"]).timestamp() if e["date"] else 0.0
+        except ValueError:
+            return 0.0
+    out.sort(key=when, reverse=True)
     out = out[:FEED_LIMIT]
     _feed_cache[user_id] = (time.time(), out)
     return out

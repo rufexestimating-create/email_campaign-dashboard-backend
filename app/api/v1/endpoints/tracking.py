@@ -87,6 +87,20 @@ def replies(limit: int = Query(50, ge=1, le=200), user: dict = Depends(get_curre
             "replies": reply_inbox.recent(user["id"], limit)}
 
 
+@router.get("/replies/{reply_id}", summary="One reply in full, like opening an email; it counts as read from now on")
+def reply_open(reply_id: str, user: dict = Depends(get_current_user)):
+    row = reply_inbox.open_reply(user["id"], reply_id)
+    if not row:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Reply not found.")
+    return row
+
+
+@router.post("/replies/{reply_id}/unread", status_code=status.HTTP_204_NO_CONTENT, summary="Mark a reply as unread again")
+def reply_unread(reply_id: str, user: dict = Depends(get_current_user)):
+    if not reply_inbox.mark_unread(user["id"], reply_id):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Reply not found.")
+
+
 def _lead_email(user_id: str, lead_id: str) -> str:
     rows = get_supabase().table("leads").select("email").eq("id", lead_id).eq("user_id", user_id).limit(1).execute().data
     if not rows:

@@ -25,6 +25,8 @@ logger = logging.getLogger(__name__)
 POLL_SECONDS = 60
 LOOKBACK_DAYS = 3
 SNIPPET_LENGTH = 500
+BODY_LENGTH = 20000
+IMAGE_TAG = re.compile(r"\[image:[^\]]*\]", re.I)  # Gmail's plain text marks inline images like this
 # Out-of-office and other automatic answers aren't real replies: they mustn't stop follow-ups
 AUTO_PRECEDENCE = {"bulk", "junk", "list", "auto_reply"}
 SYSTEM_SENDERS = re.compile(r"^(mailer-daemon|postmaster|no-?reply|do-?not-?reply|bounces?)@", re.I)
@@ -96,6 +98,17 @@ def reply_text(body: str) -> str:
     return BOLD_RE.sub(r"\1", re.sub(r"\s+", " ", "\n".join(lines))).strip()[:SNIPPET_LENGTH]
 
 
+def full_text(body: str) -> str:
+    """Everything they wrote, with its line breaks, without the quoted original email below it."""
+    body = body.replace("\r\n", "\n")
+    m = QUOTE_START.search(body)
+    if m:
+        body = body[:m.start()]
+    lines = [l.rstrip() for l in body.splitlines() if not l.lstrip().startswith(">")]
+    text = IMAGE_TAG.sub("", BOLD_RE.sub(r"\1", "\n".join(lines)))
+    return re.sub(r"\n{3,}", "\n\n", text).strip()[:BODY_LENGTH]
+
+
 def parse(raw: bytes, now: datetime | None = None) -> dict | None:
     """Raw message -> the fields we keep, or None for automatic messages and messages without a sender."""
     msg = email.message_from_bytes(raw)
@@ -114,6 +127,7 @@ def parse(raw: bytes, now: datetime | None = None) -> dict | None:
         "message_id": message_id[:500],
         "received_at": received,
         "snippet": reply_text(_body_text(msg)),
+        "body": full_text(_body_text(msg)),
         "to": [a.lower() for _, a in getaddresses(msg.get_all("To", []) + msg.get_all("Cc", []))],
     }
 
@@ -133,7 +147,7 @@ def record(db, reply: dict) -> bool:
         return False
     row = {
         "user_id": log["user_id"], "email_id": log["id"], "campaign_id": log.get("campaign_id"), "recipient": log["recipient"],
-        "from_name": reply["from_name"], "subject": reply["subject"], "snippet": reply["snippet"],
+        "from_name": reply["from_name"], "subject": reply["subject"], "snippet": reply["snippet"], "body": reply.get("body"),
         "message_id": reply["message_id"], "received_at": reply["received_at"].isoformat(),
     }
     # message_id is unique: a message read again on the next poll inserts nothing
@@ -210,7 +224,7 @@ def poll(now: datetime | None = None, force: bool = False) -> int:
 def recent(user_id: str, limit: int = 50) -> list[dict]:
     """Newest replies with the lead each one came from, for the dashboard."""
     db = get_supabase()
-    rows = db.table("email_replies").select("id, email_id, campaign_id, recipient, from_name, subject, snippet, received_at") \
+    rows = db.table("email_replies").select("id, email_id, campaign_id, recipient, from_name, subject, snippet, received_at, read_at") \
         .eq("user_id", user_id).order("received_at", desc=True).limit(limit).execute().data
     emails = sorted({r["recipient"] for r in rows})
     leads = {l["email"]: l for l in db.table("leads").select("id, email, name, lifecycle_stage").eq("user_id", user_id)
@@ -220,5 +234,59 @@ def recent(user_id: str, limit: int = 50) -> list[dict]:
     for r in rows:
         lead = leads.get(r["recipient"], {})
         r.update(lead_id=lead.get("id"), lead_name=lead.get("name") or r["from_name"], stage=lead.get("lifecycle_stage"),
-                 campaign_name=names.get(r["campaign_id"]))
+                 campaign_name=names.get(r["campaign_id"]), unread=not r.get("read_at"))
     return rows
+
+
+def _fetch_body(message_id: str) -> str | None:
+    """The full text of one reply, read again from the reply mailbox (replies stored before the full text was kept)."""
+    if not is_configured() or not message_id or message_id.startswith("<no-id"):
+        return None
+    imap = imaplib.IMAP4_SSL(settings.IMAP_HOST, settings.IMAP_PORT, timeout=30)
+    try:
+        imap.login(settings.IMAP_USER, settings.IMAP_PASSWORD)
+        imap.select("INBOX", readonly=True)
+        _, data = imap.uid("search", None, "HEADER", "Message-ID", f'"{message_id}"')
+        uids = (data[0] or b"").split() if data else []
+        if not uids:
+            return None
+        _, parts = imap.uid("fetch", uids[-1], "(BODY.PEEK[])")
+        raw = next((p[1] for p in parts or [] if isinstance(p, tuple)), None)
+        return full_text(_body_text(email.message_from_bytes(raw))) if raw else None
+    except Exception as e:
+        logger.warning("Couldn't read reply %s from the reply mailbox: %s", message_id, e)
+        return None
+    finally:
+        try:
+            imap.logout()
+        except Exception:
+            pass
+
+
+def open_reply(user_id: str, reply_id: str) -> dict | None:
+    """One reply in full, like opening an email: its whole text, and it counts as read from now on."""
+    db = get_supabase()
+    rows = db.table("email_replies").select("id, email_id, campaign_id, recipient, from_name, subject, snippet, body, message_id, received_at, read_at") \
+        .eq("id", reply_id).eq("user_id", user_id).limit(1).execute().data
+    if not rows:
+        return None
+    r = rows[0]
+    changes: dict = {}
+    if not r.get("body"):
+        body = _fetch_body(r["message_id"])
+        if body:
+            r["body"] = changes["body"] = body
+    if not r.get("read_at"):
+        r["read_at"] = changes["read_at"] = datetime.now(timezone.utc).isoformat()
+    if changes:
+        db.table("email_replies").update(changes).eq("id", reply_id).execute()
+    lead = (db.table("leads").select("id, name, lifecycle_stage").eq("user_id", user_id).eq("email", r["recipient"]).limit(1).execute().data or [{}])[0]
+    campaign = (db.table("campaigns").select("name").eq("id", r["campaign_id"]).limit(1).execute().data or [{}])[0] if r.get("campaign_id") else {}
+    r.pop("message_id", None)
+    r.update(body=r.get("body") or r.get("snippet") or "", lead_id=lead.get("id"), lead_name=lead.get("name") or r["from_name"],
+             stage=lead.get("lifecycle_stage"), campaign_name=campaign.get("name"), unread=False)
+    return r
+
+
+def mark_unread(user_id: str, reply_id: str) -> bool:
+    return bool(get_supabase().table("email_replies").update({"read_at": None}).eq("id", reply_id).eq("user_id", user_id).execute().data)

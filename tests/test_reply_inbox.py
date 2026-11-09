@@ -52,3 +52,14 @@ def test_gmail_wraps_the_wrote_line_and_marks_bold():
 
 def test_a_reply_that_starts_with_on_is_kept():
     assert reply_text("On Tuesday works for me.\n\nThanks") == "On Tuesday works for me. Thanks"
+
+
+def test_full_text_keeps_the_whole_message_with_line_breaks():
+    from app.services import reply_inbox as ri
+
+    body = ("Hi Ameer,\r\n\r\nMany of your clients need expert permit plans.\r\nWe can provide work samples.\r\n\r\n\r\n\r\n"
+            "[image: \u2713] Thanks,\r\nGary\r\n\r\nOn Mon, 9 Nov 2026 at 10:00, Ameer <a@x.com> wrote:\r\n> earlier email\r\n")
+    text = ri.full_text(body)
+    assert text == "Hi Ameer,\n\nMany of your clients need expert permit plans.\nWe can provide work samples.\n\n Thanks,\nGary"
+    assert "wrote" not in text and "earlier" not in text
+    assert len(ri.full_text("x" * 30000)) == ri.BODY_LENGTH

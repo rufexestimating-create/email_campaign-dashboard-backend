@@ -250,3 +250,17 @@ def test_newsletters_are_found_by_themselves(monkeypatch):
     assert added == {("Dezeen Jobs", "dezeen.com"), ("Morning Brew", "morningbrew.com")}  # named after its newest email
     assert nl.discover(Imap(), mb, datetime(2026, 11, 9, tzinfo=timezone.utc)) == 0   # each sender once
     assert nl.base_domain("mail.example.co.uk") == "example.co.uk"
+
+
+def test_signup_confirmation_counts_as_a_newsletter_but_not_logins():
+    import email as em
+    from app.services import newsletters as nl
+
+    def head(subject):
+        return em.message_from_string(f"From: X <a@b.com>\r\nSubject: {subject}\r\n\r\n")
+    for s in ["TLDR - Confirm your signup", "Please confirm your subscription", "Verify your email address to get the newsletter",
+              "Confirm your subscription to Morning Brew"]:
+        assert nl.is_newsletter(head(s)), s
+    for s in ["Confirm your login", "Verify it's you", "Confirm your new password", "Confirm your order", "Hello there",
+              "Your one-time passcode", "Verify your device to sign in"]:
+        assert not nl.is_newsletter(head(s)), s

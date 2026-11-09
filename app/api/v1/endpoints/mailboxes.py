@@ -35,6 +35,8 @@ def newsletter_add(mailbox_id: str, data: NewsletterAdd, user: dict = Depends(ge
 
 @router.get("/newsletters/feed", summary="The newest newsletter emails in all the mailboxes' inboxes (live, newest first)")
 def newsletter_feed(fresh: bool = False, user: dict = Depends(get_current_user)):
+    if fresh:  # "Check now": look for new newsletters first, instead of waiting for the next 5-minute check
+        newsletters.check_now(user["id"])
     return newsletters.feed(user["id"], fresh=fresh)
 
 

@@ -187,9 +187,25 @@ def base_domain(host: str) -> str:
     return ".".join(labels[-2:])
 
 
+# "Confirm your signup", "Please verify your subscription"...: the first email of a newsletter, often without list headers
+SIGNUP_CONFIRM = re.compile(r"(confirm|verify|activate|complete)\b.{0,40}\b(sign ?up|subscri|newsletter|email address|your email)|"
+                            r"\b(subscription|opt[- ]?in)\b.{0,30}\b(confirm|verify)|\bdouble opt", re.I)
+# Never treated as a newsletter signup, whatever else the subject says: these links must not be clicked by a robot
+NOT_SIGNUP = re.compile(r"log ?in|sign ?in|password|passcode|security|device|payment|invoice|order|account (access|recovery)|"
+                        r"two.factor|2fa|one.time|otp|bank|verify (it'?s|that it'?s) you", re.I)
+
+
+def is_signup_confirmation(head: Message) -> bool:
+    subject = _decoded(head.get("Subject"))
+    return bool(SIGNUP_CONFIRM.search(subject)) and not NOT_SIGNUP.search(subject)
+
+
 def is_newsletter(head: Message) -> bool:
-    """Bulk mail a person signed up for carries a List-Unsubscribe or List-Id header (Gmail's Unsubscribe link uses it)."""
-    return bool(head.get("List-Unsubscribe") or head.get("List-Id")) and not head.get("X-Warmup-Id")
+    """Bulk mail a person signed up for carries a List-Unsubscribe or List-Id header (Gmail's Unsubscribe link uses it).
+    A newsletter's 'confirm your signup' email often doesn't, so that counts too."""
+    if head.get("X-Warmup-Id"):
+        return False
+    return bool(head.get("List-Unsubscribe") or head.get("List-Id")) or is_signup_confirmation(head)
 
 
 def discover(imap, mb: dict, now: datetime) -> int:
@@ -212,7 +228,7 @@ def discover(imap, mb: dict, now: datetime) -> int:
     uids = sorted((data[0] or b"").split() if data else [], key=int, reverse=True)[:DISCOVER_LIMIT]
     if not uids:
         return 0
-    _, parts = imap.uid("fetch", b",".join(uids), "(BODY.PEEK[HEADER.FIELDS (FROM LIST-UNSUBSCRIBE LIST-ID X-WARMUP-ID)])")
+    _, parts = imap.uid("fetch", b",".join(uids), "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT LIST-UNSUBSCRIBE LIST-ID X-WARMUP-ID)])")
     found: dict[str, str] = {}
     for part in parts or []:
         if not isinstance(part, tuple):
@@ -399,6 +415,33 @@ FEED_SECONDS = 45   # the feed is read from the mailboxes at most this often per
 FEED_PER_NEWSLETTER = 10
 FEED_LIMIT = 40
 _feed_cache: dict[str, tuple[float, list[dict]]] = {}
+
+
+def check_now(user_id: str) -> dict:
+    """What the 5-minute inbox check does for newsletters, right now, for all the user's mailboxes: find new ones,
+    confirm pending signups, open new issues, take them out of spam."""
+    from app.services import mailbox_warmup as mw
+
+    total = {"found": 0, "received": 0, "rescued": 0, "confirmed": 0}
+    now = datetime.now().astimezone()
+    for mb in mw._db().table("mailboxes").select(mw.PUBLIC_FIELDS + ", password_enc").eq("user_id", user_id).execute().data:
+        if mb.get("status") == "error":
+            continue
+        try:
+            imap = mw._imap(mb, mw.decrypt(mb["password_enc"]))
+        except Exception as e:
+            logger.warning("Newsletter check: can't open %s: %s", mb["email"], e)
+            continue
+        try:
+            _, lines = imap.list()
+            result = process(imap, mb, mw.spam_folder(lines or []), now, mw._move_to_inbox, mw._quote)
+            for k in total:
+                total[k] += result.get(k, 0)
+        except Exception as e:
+            logger.warning("Newsletter check failed for %s: %s", mb["email"], e)
+        finally:
+            mw._logout(imap)
+    return total
 
 
 def feed(user_id: str, fresh: bool = False) -> list[dict]:

@@ -174,12 +174,81 @@ def remove_subscription(user_id: str, sub_id: str) -> bool:
 
 # ---------- Inbox check ----------
 
+DISCOVER_LIMIT = 60      # newest Inbox emails looked at for new newsletters, per check
+MAX_AUTO_PER_MAILBOX = 40
+SECOND_LEVEL = {"co", "com", "org", "net", "ac", "gov", "edu"}  # example.co.uk -> keep three labels
+
+
+def base_domain(host: str) -> str:
+    """news.mail.dezeen.com -> dezeen.com; mail.example.co.uk -> example.co.uk."""
+    labels = [x for x in host.lower().strip(".").split(".") if x]
+    if len(labels) >= 3 and len(labels[-1]) == 2 and labels[-2] in SECOND_LEVEL:
+        return ".".join(labels[-3:])
+    return ".".join(labels[-2:])
+
+
+def is_newsletter(head: Message) -> bool:
+    """Bulk mail a person signed up for carries a List-Unsubscribe or List-Id header (Gmail's Unsubscribe link uses it)."""
+    return bool(head.get("List-Unsubscribe") or head.get("List-Id")) and not head.get("X-Warmup-Id")
+
+
+def discover(imap, mb: dict, now: datetime) -> int:
+    """Newsletters that arrived in `mb`'s Inbox are added to its subscriptions by themselves: no list to pick from and
+    nothing to click. Only the Inbox is looked at, so a sender is only ever taken out of spam (by process()) once it
+    has reached the Inbox before; real spam stays in spam. Mail from the user's own mailboxes is never a newsletter."""
+    if not mb.get("user_id"):
+        return 0
+    db = _db()
+    subs = db.table("newsletter_subscriptions").select("id, sender_domains").eq("mailbox_id", mb["id"]).execute().data
+    if len(subs) >= MAX_AUTO_PER_MAILBOX:
+        return 0
+    known = {d for s in subs for d in clean_domains(s["sender_domains"])}
+    own = {base_domain(m["email"].rsplit("@", 1)[-1]) for m in
+           db.table("mailboxes").select("email").eq("user_id", mb["user_id"]).execute().data}
+    if imap.select('"INBOX"')[0] != "OK":
+        return 0
+    since = (now - timedelta(days=LOOKBACK_DAYS)).strftime("%d-%b-%Y")
+    _, data = imap.uid("search", None, "SINCE", since)
+    uids = sorted((data[0] or b"").split() if data else [], key=int, reverse=True)[:DISCOVER_LIMIT]
+    if not uids:
+        return 0
+    _, parts = imap.uid("fetch", b",".join(uids), "(BODY.PEEK[HEADER.FIELDS (FROM LIST-UNSUBSCRIBE LIST-ID X-WARMUP-ID)])")
+    found: dict[str, str] = {}
+    for part in parts or []:
+        if not isinstance(part, tuple):
+            continue
+        head = email.message_from_bytes(part[1] or b"")
+        host = sender_domain(head)
+        if not host or not is_newsletter(head):
+            continue
+        dom = base_domain(host)
+        if dom in own or dom in known or domain_matches(host, list(known)) or dom in found:
+            continue
+        name = parseaddr(_decoded(head.get("From")))[0].strip().strip('"') or dom
+        found[dom] = name[:120]
+    added = 0
+    for dom, name in found.items():
+        if len(subs) + added >= MAX_AUTO_PER_MAILBOX:
+            break
+        db.table("newsletter_subscriptions").insert({
+            "user_id": mb["user_id"], "mailbox_id": mb["id"], "name": name, "signup_url": None, "sender_domains": dom,
+        }).execute()
+        added += 1
+    if added:
+        logger.info("Found %d new newsletter(s) in %s: %s", added, mb["email"], ", ".join(found))
+    return added
+
+
 def process(imap, mb: dict, junk: str | None, now: datetime, move_to_inbox, quote) -> dict:
-    """Handles the newsletters that reached `mb`: rescues from spam, marks read, confirms pending subscriptions.
+    """Handles the newsletters that reached `mb`: finds new ones, rescues from spam, marks read, confirms pending ones.
     `move_to_inbox(imap, uid)` and `quote(folder)` come from mailbox_warmup."""
     db = _db()
+    result = {"received": 0, "rescued": 0, "confirmed": 0, "found": 0}
+    try:
+        result["found"] = discover(imap, mb, now)
+    except Exception as e:  # finding new ones is extra: the known newsletters are still handled
+        logger.warning("Newsletter discovery failed for %s: %s", mb.get("email"), e)
     subs = db.table("newsletter_subscriptions").select("*").eq("mailbox_id", mb["id"]).execute().data
-    result = {"received": 0, "rescued": 0, "confirmed": 0}
     if not subs:
         return result
     since = (now - timedelta(days=LOOKBACK_DAYS)).strftime("%d-%b-%Y")

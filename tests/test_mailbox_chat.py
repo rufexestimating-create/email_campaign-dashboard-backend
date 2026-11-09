@@ -160,7 +160,7 @@ def test_newsletters_are_confirmed_read_and_rescued(monkeypatch):
     result = nl.process(imap, {"id": "mb1"}, "INBOX.Spam", NOW, mw._move_to_inbox, mw._quote)
 
     assert opened == ["https://morningbrew.com/confirm?t=1"]
-    assert result == {"received": 2, "rescued": 1, "confirmed": 1}
+    assert result == {"received": 2, "rescued": 1, "confirmed": 1, "found": 0}
     assert sub["status"] == "confirmed" and sub["received_count"] == 2 and sub["rescued_count"] == 1
     assert ('"INBOX"', b"1", "(\\Seen)") in imap.flags and ('"INBOX.Spam"', b"7") in imap.moved
 
@@ -200,3 +200,53 @@ def test_a_newsletter_can_be_read_in_the_dashboard_but_no_other_mail(monkeypatch
         except LookupError:
             continue
         raise AssertionError(f"uid {uid} must not be readable")
+
+
+
+def test_newsletters_are_found_by_themselves(monkeypatch):
+    from datetime import datetime, timezone
+    from app.services import mailbox_warmup as mw, newsletters as nl
+
+    heads = {
+        b"1": "From: Dezeen Daily <news@mail.dezeen.com>\r\nList-Unsubscribe: <https://dezeen.com/u>\r\n\r\n",
+        b"2": "From: Ali <ali@gmail.com>\r\n\r\n",                                                    # a person: not a newsletter
+        b"3": "From: Arvistry <resend@arvistry.com>\r\nList-Unsubscribe: <x>\r\n\r\n",                 # own mailbox domain
+        b"4": "From: Ameer <a@hmdesigngroup.com>\r\nX-Warmup-Id: 1\r\nList-Id: <w>\r\n\r\n",           # warm-up email
+        b"5": "From: Morning Brew <crew@morningbrew.com>\r\nList-Id: <brew.morningbrew.com>\r\n\r\n",
+        b"6": "From: Dezeen Jobs <jobs@dezeen.com>\r\nList-Unsubscribe: <y>\r\n\r\n",                  # same sender as 1
+    }
+
+    class Imap:
+        def select(self, folder):
+            return "OK", [b"6"]
+        def uid(self, cmd, *args):
+            if cmd == "search":
+                return "OK", [b" ".join(heads)]
+            return "OK", [(b"%s (UID %s BODY[HEADER] {9}" % (u, u), heads[u].encode()) for u in args[0].split(b",")]
+
+    tables = {"newsletter_subscriptions": [{"id": "old", "mailbox_id": "mb1", "sender_domains": "tldr.tech"}],
+              "mailboxes": [{"email": "resend@arvistry.com", "user_id": "u1"}, {"email": "a@hmdesigngroup.com", "user_id": "u1"}]}
+
+    class Q:
+        def __init__(self, name):
+            self.name, self.filters, self.row = name, [], None
+        def select(self, *_):
+            return self
+        def eq(self, k, v):
+            self.filters.append((k, v)); return self
+        def insert(self, row):
+            self.row = row; return self
+        def execute(self):
+            if self.row is not None:
+                tables[self.name].append(self.row)
+                return type("R", (), {"data": [self.row]})
+            rows = [r for r in tables[self.name] if all(r.get(k) == v for k, v in self.filters)]
+            return type("R", (), {"data": rows})
+
+    monkeypatch.setattr(mw, "_db", lambda: type("DB", (), {"table": lambda self, n: Q(n)})())
+    mb = {"id": "mb1", "user_id": "u1", "email": "a@hmdesigngroup.com"}
+    assert nl.discover(Imap(), mb, datetime(2026, 11, 9, tzinfo=timezone.utc)) == 2
+    added = {(r["name"], r["sender_domains"]) for r in tables["newsletter_subscriptions"] if r.get("user_id") == "u1"}
+    assert added == {("Dezeen Jobs", "dezeen.com"), ("Morning Brew", "morningbrew.com")}  # named after its newest email
+    assert nl.discover(Imap(), mb, datetime(2026, 11, 9, tzinfo=timezone.utc)) == 0   # each sender once
+    assert nl.base_domain("mail.example.co.uk") == "example.co.uk"

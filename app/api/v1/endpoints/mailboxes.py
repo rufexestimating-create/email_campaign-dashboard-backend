@@ -33,6 +33,11 @@ def newsletter_add(mailbox_id: str, data: NewsletterAdd, user: dict = Depends(ge
         raise _bad(e)
 
 
+@router.get("/newsletters/feed", summary="The newest newsletter emails in all the mailboxes' inboxes (live, newest first)")
+def newsletter_feed(fresh: bool = False, user: dict = Depends(get_current_user)):
+    return newsletters.feed(user["id"], fresh=fresh)
+
+
 @router.get("/newsletters/{sub_id}/emails", summary="A newsletter's emails in the mailbox's inbox (last 30 days)")
 def newsletter_emails(sub_id: str, user: dict = Depends(get_current_user)):
     try:

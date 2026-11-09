@@ -554,3 +554,42 @@ def test_gap_between_emails_and_reply_delay():
                     if s["from"]["id"] == "a"))
     assert len(sends) == 8 and all((b - a).total_seconds() >= 40 * 60 - 1 for a, b in zip(sends, sends[1:]))
     assert mw.REPLY_DELAYS["fast"] == (5, 30) and mw.advanced({})["reply_delay"] == "normal"
+
+
+
+def test_newsletter_feed_merges_mailboxes_newest_first(monkeypatch):
+    from app.services import mailbox_warmup as mw, newsletters as nl
+
+    class FakeInbox:
+        def __init__(self, mails):
+            self.mails = mails  # uid -> (from, subject, date)
+        def uid(self, cmd, *args):
+            if cmd == "search":
+                dom = args[-1].strip('"')
+                return "OK", [b" ".join(u for u, m in self.mails.items() if dom in m[0])]
+            parts = []
+            for u in args[0].split(b","):
+                f, subj, d = self.mails[u]
+                parts.append((b"1 (UID " + u + b" FLAGS (\Seen) BODY[...]", f"From: {f}\r\nSubject: {subj}\r\nDate: {d}\r\n\r\n".encode()))
+            return "OK", parts
+
+    boxes = {"a": {"id": "a", "email": "a@x.com", "status": "active"}, "b": {"id": "b", "email": "b@x.com", "status": "active"}}
+    inboxes = {
+        "a": FakeInbox({b"5": ("Dezeen <news@dezeen.com>", "Old issue", "Mon, 02 Nov 2026 10:00:00 +0000"),
+                        b"9": ("Dezeen <news@dezeen.com>", "New issue", "Mon, 09 Nov 2026 10:00:00 +0000")}),
+        "b": FakeInbox({b"3": ("Morning Brew <crew@morningbrew.com>", "Brew", "Sun, 08 Nov 2026 10:00:00 +0000")}),
+    }
+    monkeypatch.setattr(nl, "list_subscriptions", lambda uid: [
+        {"id": "s1", "mailbox_id": "a", "name": "Dezeen", "sender_domains": "dezeen.com"},
+        {"id": "s2", "mailbox_id": "b", "name": "Morning Brew", "sender_domains": "morningbrew.com"},
+    ])
+    monkeypatch.setattr(mw, "get_mailbox", lambda uid, mid, with_password=False: boxes[mid])
+    monkeypatch.setattr(nl, "_open_inbox", lambda mb: inboxes[mb["id"]])
+    monkeypatch.setattr(mw, "_logout", lambda imap: None)
+    nl._feed_cache.clear()
+    out = nl.feed("u1")
+    assert [e["subject"] for e in out] == ["New issue", "Brew", "Old issue"]
+    assert out[0]["newsletter"] == "Dezeen" and out[0]["mailbox"] == "a@x.com" and out[0]["seen"]
+    inboxes["a"].mails[b"10"] = ("Dezeen <news@dezeen.com>", "Newest", "Mon, 09 Nov 2026 12:00:00 +0000")
+    assert nl.feed("u1")[0]["subject"] == "New issue"        # cached
+    assert nl.feed("u1", fresh=True)[0]["subject"] == "Newest"

@@ -15,6 +15,7 @@ import ipaddress
 import logging
 import re
 import socket
+import time
 from datetime import datetime, timedelta
 from email.message import Message
 from email.utils import parseaddr
@@ -323,6 +324,68 @@ def list_emails(user_id: str, sub_id: str) -> list[dict]:
         return sorted(out, key=lambda e: int(e["uid"]), reverse=True)
     finally:
         mw._logout(imap)
+
+
+FEED_SECONDS = 45   # the feed is read from the mailboxes at most this often per user
+FEED_PER_NEWSLETTER = 10
+FEED_LIMIT = 40
+_feed_cache: dict[str, tuple[float, list[dict]]] = {}
+
+
+def feed(user_id: str, fresh: bool = False) -> list[dict]:
+    """The newest newsletter emails in the Inboxes of all the user's mailboxes, newest first: one list, like an inbox.
+    One login per mailbox; cached briefly so the dashboard's refresh doesn't log in every few seconds."""
+    from app.services import mailbox_warmup as mw
+
+    hit = _feed_cache.get(user_id)
+    if hit and not fresh and time.time() - hit[0] < FEED_SECONDS:
+        return hit[1]
+    by_mailbox: dict[str, list[dict]] = {}
+    for s in list_subscriptions(user_id):
+        by_mailbox.setdefault(s["mailbox_id"], []).append(s)
+    since = (datetime.now().astimezone() - timedelta(days=READ_DAYS)).strftime("%d-%b-%Y")
+    out: list[dict] = []
+    for mailbox_id, subs in by_mailbox.items():
+        mb = mw.get_mailbox(user_id, mailbox_id, with_password=True)
+        if not mb or mb.get("status") == "error":
+            continue
+        try:
+            imap = _open_inbox(mb)
+        except Exception as e:  # one mailbox that can't log in must not empty the whole feed
+            logger.warning("Newsletter feed: can't open %s: %s", mb["email"], e)
+            continue
+        try:
+            for s in subs:
+                domains = clean_domains(s["sender_domains"])
+                uids: set[bytes] = set()
+                for d in domains:
+                    _, data = imap.uid("search", None, "SINCE", since, "FROM", f'"{d}"')
+                    uids |= set((data[0] or b"").split()) if data else set()
+                newest = sorted(uids, key=int, reverse=True)[:FEED_PER_NEWSLETTER]
+                if not newest:
+                    continue
+                _, parts = imap.uid("fetch", b",".join(newest), "(FLAGS BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)])")
+                for part in parts or []:
+                    if not isinstance(part, tuple):
+                        continue
+                    uid = re.search(rb"UID (\d+)", part[0])
+                    head = email.message_from_bytes(part[1] or b"")
+                    if not uid or not domain_matches(sender_domain(head), domains):
+                        continue
+                    out.append({
+                        "sub_id": s["id"], "newsletter": s["name"], "mailbox_id": mailbox_id, "mailbox": mb["email"],
+                        "uid": uid.group(1).decode(), "from": _decoded(head.get("From")),
+                        "subject": _decoded(head.get("Subject")) or "(no subject)", "date": _iso(head.get("Date")),
+                        "seen": b"\\Seen" in part[0],
+                    })
+        except Exception as e:
+            logger.warning("Newsletter feed: reading %s failed: %s", mb["email"], e)
+        finally:
+            mw._logout(imap)
+    out.sort(key=lambda e: e["date"] or "", reverse=True)
+    out = out[:FEED_LIMIT]
+    _feed_cache[user_id] = (time.time(), out)
+    return out
 
 
 def read_email(user_id: str, sub_id: str, uid: str) -> dict:

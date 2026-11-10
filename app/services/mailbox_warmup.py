@@ -866,13 +866,19 @@ def send_due(mailboxes: list[dict], now: datetime) -> int:
     return sent
 
 
+FIND_FALLBACK_LIMIT = 300  # newest emails looked at when the server can't search by header
 HEADER_ID_RE = re.compile(rb"X-Warmup-Id:\s*([0-9a-f-]{36})", re.I)
 
 
 def _find(imap, since: str) -> dict[str, bytes]:
     """{warm-up id: uid} of the warm-up emails in the selected folder."""
-    _, data = imap.uid("search", None, "SINCE", since, "HEADER", HEADER, '""')
-    uids = search_uids(data)
+    typ, data = imap.uid("search", None, "SINCE", since, "HEADER", HEADER, '""')
+    if typ != "OK":
+        # Some servers (e.g. AgentMail) can't search by header: take the recent emails and read the header of each
+        _, data = imap.uid("search", None, "SINCE", since)
+        uids = search_uids(data)[-FIND_FALLBACK_LIMIT:]
+    else:
+        uids = search_uids(data)
     if not uids:
         return {}
     _, parts = imap.uid("fetch", b",".join(uids), f"(BODY.PEEK[HEADER.FIELDS ({HEADER.upper()})])")

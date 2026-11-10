@@ -602,3 +602,18 @@ def test_search_uids_ignores_extra_tokens():
     assert mw.search_uids([b"1 2 3"]) == [b"1", b"2", b"3"]
     assert mw.search_uids([b"SEARCH 4 5", b"6"]) == [b"4", b"5", b"6"]   # AgentMail-style answer
     assert mw.search_uids([b""]) == [] and mw.search_uids(None) == []
+
+
+
+def test_find_falls_back_when_header_search_is_not_supported():
+    from app.services import mailbox_warmup as mw
+
+    class Imap:
+        def uid(self, cmd, *args):
+            if cmd == "search":
+                if "HEADER" in args:
+                    return "NO", [b"SEARCH criterion not supported: HEADER"]
+                return "OK", [b"1 2"]
+            return "OK", [(b"1 (UID 1 BODY[HEADER.FIELDS (X-WARMUP-ID)] {50}", b"X-Warmup-Id: 36c259a2-952b-427d-9383-395c62047530\r\n\r\n"),
+                          b")", (b"2 (UID 2 BODY[HEADER.FIELDS (X-WARMUP-ID)] {2}", b"\r\n"), b")"]
+    assert mw._find(Imap(), "07-Nov-2026") == {"36c259a2-952b-427d-9383-395c62047530": b"1"}

@@ -53,6 +53,12 @@ CATALOG = [
 ]
 
 
+def _uids(data) -> list[bytes]:
+    from app.services import mailbox_warmup
+
+    return mailbox_warmup.search_uids(data)
+
+
 def _db():
     from app.services import mailbox_warmup  # one place to reach the database (tests replace it there)
 
@@ -225,7 +231,7 @@ def discover(imap, mb: dict, now: datetime) -> int:
         return 0
     since = (now - timedelta(days=LOOKBACK_DAYS)).strftime("%d-%b-%Y")
     _, data = imap.uid("search", None, "SINCE", since)
-    uids = sorted((data[0] or b"").split() if data else [], key=int, reverse=True)[:DISCOVER_LIMIT]
+    uids = sorted(_uids(data), key=int, reverse=True)[:DISCOVER_LIMIT]
     if not uids:
         return 0
     _, parts = imap.uid("fetch", b",".join(uids), "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT LIST-UNSUBSCRIBE LIST-ID X-WARMUP-ID)])")
@@ -278,7 +284,7 @@ def process(imap, mb: dict, junk: str | None, now: datetime, move_to_inbox, quot
             uids: list[bytes] = []
             for d in domains:
                 _, data = imap.uid("search", None, *criteria, "FROM", f'"{d}"')
-                uids += [u for u in ((data[0] or b"").split() if data else []) if u not in uids]
+                uids += [u for u in _uids(data) if u not in uids]
             changes: dict = {}
             for uid in uids[:MAX_PER_CHECK]:
                 _, parts = imap.uid("fetch", uid, "(BODY.PEEK[])")
@@ -391,7 +397,7 @@ def list_emails(user_id: str, sub_id: str) -> list[dict]:
         uids: set[bytes] = set()
         for d in domains:
             _, data = imap.uid("search", None, "SINCE", since, "FROM", f'"{d}"')
-            uids |= set((data[0] or b"").split()) if data else set()
+            uids |= set(_uids(data))
         newest = sorted(uids, key=int, reverse=True)[:READ_LIMIT]
         if not newest:
             return []
@@ -472,7 +478,7 @@ def feed(user_id: str, fresh: bool = False) -> list[dict]:
                 uids: set[bytes] = set()
                 for d in domains:
                     _, data = imap.uid("search", None, "SINCE", since, "FROM", f'"{d}"')
-                    uids |= set((data[0] or b"").split()) if data else set()
+                    uids |= set(_uids(data))
                 newest = sorted(uids, key=int, reverse=True)[:FEED_PER_NEWSLETTER]
                 if not newest:
                     continue

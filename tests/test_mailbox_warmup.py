@@ -593,3 +593,12 @@ def test_newsletter_feed_merges_mailboxes_newest_first(monkeypatch):
     inboxes["a"].mails[b"10"] = ("Dezeen <news@dezeen.com>", "Newest", "Mon, 09 Nov 2026 12:00:00 +0000")
     assert nl.feed("u1")[0]["subject"] == "New issue"        # cached
     assert nl.feed("u1", fresh=True)[0]["subject"] == "Newest"
+
+
+
+def test_search_uids_ignores_extra_tokens():
+    from app.services import mailbox_warmup as mw
+
+    assert mw.search_uids([b"1 2 3"]) == [b"1", b"2", b"3"]
+    assert mw.search_uids([b"SEARCH 4 5", b"6"]) == [b"4", b"5", b"6"]   # AgentMail-style answer
+    assert mw.search_uids([b""]) == [] and mw.search_uids(None) == []

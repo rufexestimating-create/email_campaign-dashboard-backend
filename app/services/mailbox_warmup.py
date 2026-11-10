@@ -421,6 +421,18 @@ def spam_folder(list_lines: list[bytes]) -> str | None:
     return by_name
 
 
+def search_uids(data) -> list[bytes]:
+    """The UIDs in an IMAP SEARCH answer. Some servers (e.g. AgentMail) put the word SEARCH or other tokens in it, and
+    the answer can be spread over several items: keep only the numbers."""
+    out: list[bytes] = []
+    for item in data or []:
+        if isinstance(item, tuple):
+            item = item[-1]
+        if isinstance(item, bytes):
+            out += [t for t in item.split() if t.isdigit() and t not in out]
+    return out
+
+
 def _quote(folder: str) -> str:
     return '"' + folder.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
@@ -860,7 +872,7 @@ HEADER_ID_RE = re.compile(rb"X-Warmup-Id:\s*([0-9a-f-]{36})", re.I)
 def _find(imap, since: str) -> dict[str, bytes]:
     """{warm-up id: uid} of the warm-up emails in the selected folder."""
     _, data = imap.uid("search", None, "SINCE", since, "HEADER", HEADER, '""')
-    uids = (data[0] or b"").split() if data else []
+    uids = search_uids(data)
     if not uids:
         return {}
     _, parts = imap.uid("fetch", b",".join(uids), f"(BODY.PEEK[HEADER.FIELDS ({HEADER.upper()})])")

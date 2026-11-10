@@ -186,7 +186,7 @@ def poll(now: datetime | None = None, force: bool = False) -> int:
         imap.login(settings.IMAP_USER, settings.IMAP_PASSWORD)
         imap.select("INBOX", readonly=True)  # read-only: nothing is marked read, moved or deleted
         _, data = imap.uid("search", None, "SINCE", since)
-        uids = data[0].split()
+        uids = [t for t in (data[0] or b"").split() if t.isdigit()] if data else []
         if not uids:
             return 0
         # Headers first: only messages from people we emailed, and not stored yet, are downloaded in full
@@ -247,7 +247,7 @@ def _fetch_body(message_id: str) -> str | None:
         imap.login(settings.IMAP_USER, settings.IMAP_PASSWORD)
         imap.select("INBOX", readonly=True)
         _, data = imap.uid("search", None, "HEADER", "Message-ID", f'"{message_id}"')
-        uids = (data[0] or b"").split() if data else []
+        uids = [t for t in (data[0] or b"").split() if t.isdigit()] if data else []
         if not uids:
             return None
         _, parts = imap.uid("fetch", uids[-1], "(BODY.PEEK[])")
